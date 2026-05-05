@@ -1,16 +1,26 @@
-import { readdirSync, lstatSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
-import { execFileSync } from 'child_process';
-import { join, relative } from 'path';
-import { cpus, totalmem } from 'os';
-import type { BrainEngine } from '../core/engine.ts';
-import { importFile } from '../core/import-file.ts';
-import { loadConfig, gbrainPath } from '../core/config.ts';
-import { createProgress } from '../core/progress.ts';
-import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import {
+  readdirSync,
+  lstatSync,
+  existsSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+} from "fs";
+import { execFileSync } from "child_process";
+import { join, relative } from "path";
+import { cpus, totalmem } from "os";
+import type { BrainEngine } from "../core/engine.ts";
+import { importFile } from "../core/import-file.ts";
+import { loadConfig, gbrainPath } from "../core/config.ts";
+import { createProgress } from "../core/progress.ts";
+import {
+  getCliOptions,
+  cliOptsToProgressOptions,
+} from "../core/cli-options.ts";
 
 function defaultWorkers(): number {
   const cpuCount = cpus().length;
-  const memGB = totalmem() / (1024 ** 3);
+  const memGB = totalmem() / 1024 ** 3;
   // Network-bound, so we can go higher than CPU count.
   // Cap by: DB pool (leave 2 for other queries), CPU, memory.
   const byPool = 8;
@@ -28,16 +38,20 @@ export interface RunImportResult {
   failures: Array<{ path: string; error: string }>;
 }
 
-export async function runImport(engine: BrainEngine, args: string[], opts: { commit?: string } = {}): Promise<RunImportResult> {
-  const noEmbed = args.includes('--no-embed');
-  const fresh = args.includes('--fresh');
-  const jsonOutput = args.includes('--json');
-  const workersIdx = args.indexOf('--workers');
+export async function runImport(
+  engine: BrainEngine,
+  args: string[],
+  opts: { commit?: string } = {},
+): Promise<RunImportResult> {
+  const noEmbed = args.includes("--no-embed");
+  const fresh = args.includes("--fresh");
+  const jsonOutput = args.includes("--json");
+  const workersIdx = args.indexOf("--workers");
   const workersArg = workersIdx !== -1 ? args[workersIdx + 1] : null;
   // v0.22.13 (PR #490 Q2): shared parseWorkers helper rejects bad input
   // (--workers 0, -3, "foo") with a loud error instead of silently falling
   // through to 1. Mirrors sync.ts's flag handling.
-  const { parseWorkers } = await import('../core/sync-concurrency.ts');
+  const { parseWorkers } = await import("../core/sync-concurrency.ts");
   let workerCount: number;
   try {
     workerCount = parseWorkers(workersArg ?? undefined) ?? 1;
@@ -48,30 +62,34 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   // Find dir: first non-flag arg that isn't a value for --workers
   const flagValues = new Set<number>();
   if (workersIdx !== -1) flagValues.add(workersIdx + 1);
-  const dirArg = args.find((a, i) => !a.startsWith('--') && !flagValues.has(i));
+  const dirArg = args.find((a, i) => !a.startsWith("--") && !flagValues.has(i));
 
   if (!dirArg) {
-    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--json]');
+    console.error(
+      "Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--json]",
+    );
     process.exit(1);
   }
-  const dir: string = dirArg;  // narrowed; survives closure capture
+  const dir: string = dirArg; // narrowed; survives closure capture
 
   // Collect all .md files
   const allFiles = collectMarkdownFiles(dir);
   console.log(`Found ${allFiles.length} markdown files`);
 
   // Resume from checkpoint if available
-  const checkpointPath = gbrainPath('import-checkpoint.json');
+  const checkpointPath = gbrainPath("import-checkpoint.json");
   let files = allFiles;
   let resumeIndex = 0;
 
   if (!fresh && existsSync(checkpointPath)) {
     try {
-      const cp = JSON.parse(readFileSync(checkpointPath, 'utf-8'));
+      const cp = JSON.parse(readFileSync(checkpointPath, "utf-8"));
       if (cp.dir === dir && cp.totalFiles === allFiles.length) {
         resumeIndex = cp.processedIndex;
         files = allFiles.slice(resumeIndex);
-        console.log(`Resuming from checkpoint: skipping ${resumeIndex} already-processed files`);
+        console.log(
+          `Resuming from checkpoint: skipping ${resumeIndex} already-processed files`,
+        );
       }
     } catch {
       // Invalid checkpoint, start fresh
@@ -96,23 +114,33 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
 
   // Progress on stderr so stdout stays clean for the final summary / --json payload.
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
-  progress.start('import.files', files.length);
+  progress.start("import.files", files.length);
 
   function tickProgress() {
-    progress.tick(1, `imported=${imported} skipped=${skipped} errors=${errors}`);
+    progress.tick(
+      1,
+      `imported=${imported} skipped=${skipped} errors=${errors}`,
+    );
   }
 
   async function processFile(eng: BrainEngine, filePath: string) {
     const relativePath = relative(dir, filePath);
     try {
       const result = await importFile(eng, filePath, relativePath, { noEmbed });
-      if (result.status === 'imported') {
+      if (result.status === "imported") {
         imported++;
         chunksCreated += result.chunks;
         importedSlugs.push(result.slug);
+      } else if (result.status === "frontmatter_only") {
+        // v0.27 split-hash fast-path: counts as imported (page row WAS
+        // written). chunks=0 because chunking was correctly skipped.
+        // Slug still goes into importedSlugs so downstream extractors
+        // (link / timeline) see frontmatter-derived edges.
+        imported++;
+        importedSlugs.push(result.slug);
       } else {
         skipped++;
-        if (result.error && result.error !== 'unchanged') {
+        if (result.error && result.error !== "unchanged") {
           console.error(`  Skipped ${relativePath}: ${result.error}`);
           // Bug 9 — non-"unchanged" skips carry a real error reason.
           failures.push({ path: relativePath, error: result.error });
@@ -125,7 +153,9 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
       if (errorCounts[errorKey] <= 5) {
         console.error(`  Warning: skipped ${relativePath}: ${msg}`);
       } else if (errorCounts[errorKey] === 6) {
-        console.error(`  (suppressing further "${errorKey.slice(0, 60)}..." errors)`);
+        console.error(
+          `  (suppressing further "${errorKey.slice(0, 60)}..." errors)`,
+        );
       }
       errors++;
       skipped++;
@@ -138,14 +168,23 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
       if (processed % 100 === 0) {
         try {
           const cpDir = gbrainPath();
-          if (!existsSync(cpDir)) { const { mkdirSync } = await import('fs'); mkdirSync(cpDir, { recursive: true }); }
-          writeFileSync(checkpointPath, JSON.stringify({
-            dir, totalFiles: allFiles.length,
-            processedIndex: resumeIndex + processed,
-            completedFiles: importedSlugs.length + skipped,
-            timestamp: new Date().toISOString(),
-          }));
-        } catch { /* non-fatal */ }
+          if (!existsSync(cpDir)) {
+            const { mkdirSync } = await import("fs");
+            mkdirSync(cpDir, { recursive: true });
+          }
+          writeFileSync(
+            checkpointPath,
+            JSON.stringify({
+              dir,
+              totalFiles: allFiles.length,
+              processedIndex: resumeIndex + processed,
+              completedFiles: importedSlugs.length + skipped,
+              timestamp: new Date().toISOString(),
+            }),
+          );
+        } catch {
+          /* non-fatal */
+        }
       }
     }
   }
@@ -155,13 +194,13 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
     // string sniff) and fall back to serial when database_url is unset. Both
     // checks belt-and-suspenders so we never crash on a null assertion.
     const config = loadConfig();
-    if (engine.kind === 'pglite' || !config?.database_url) {
+    if (engine.kind === "pglite" || !config?.database_url) {
       for (const file of files) {
         await processFile(engine, file);
       }
     } else {
-      const { PostgresEngine } = await import('../core/postgres-engine.ts');
-      const { resolvePoolSize } = await import('../core/db.ts');
+      const { PostgresEngine } = await import("../core/postgres-engine.ts");
+      const { resolvePoolSize } = await import("../core/db.ts");
       // Default per-worker pool is 2 (small, parallel import case). Users on
       // constrained poolers (e.g. Supabase port 6543) can cap below this via
       // GBRAIN_POOL_SIZE=1.
@@ -176,29 +215,38 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
       try {
         for (let i = 0; i < actualWorkers; i++) {
           const eng = new PostgresEngine();
-          await eng.connect({ database_url: databaseUrl, poolSize: workerPoolSize });
+          await eng.connect({
+            database_url: databaseUrl,
+            poolSize: workerPoolSize,
+          });
           workerEngines.push(eng);
         }
 
         // Thread-safe queue: atomic index counter (JS is single-threaded; the
         // read-then-increment happens between awaits so no lock is needed).
         let queueIndex = 0;
-        await Promise.all(workerEngines.map(async (eng) => {
-          while (true) {
-            const idx = queueIndex++;
-            if (idx >= files.length) break;
-            await processFile(eng, files[idx]);
-          }
-        }));
+        await Promise.all(
+          workerEngines.map(async (eng) => {
+            while (true) {
+              const idx = queueIndex++;
+              if (idx >= files.length) break;
+              await processFile(eng, files[idx]);
+            }
+          }),
+        );
       } finally {
         // v0.22.13 (PR #490 A2): try/finally guarantees cleanup even when the
         // worker loop throws. Each disconnect is best-effort — one failing
         // disconnect must not strand the others.
         await Promise.all(
-          workerEngines.map(e =>
-            e.disconnect().catch((err: unknown) =>
-              console.error(`  worker disconnect failed: ${err instanceof Error ? err.message : String(err)}`),
-            ),
+          workerEngines.map((e) =>
+            e
+              .disconnect()
+              .catch((err: unknown) =>
+                console.error(
+                  `  worker disconnect failed: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              ),
           ),
         );
       }
@@ -221,28 +269,42 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
 
   // Clear checkpoint only on successful completion (no errors)
   if (errors === 0 && existsSync(checkpointPath)) {
-    try { unlinkSync(checkpointPath); } catch { /* non-fatal */ }
+    try {
+      unlinkSync(checkpointPath);
+    } catch {
+      /* non-fatal */
+    }
   } else if (errors > 0 && existsSync(checkpointPath)) {
-    console.log(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
+    console.log(
+      `  Checkpoint preserved (${errors} errors). Run again to retry failed files.`,
+    );
   }
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
   if (jsonOutput) {
-    console.log(JSON.stringify({
-      status: 'success', duration_s: parseFloat(totalTime),
-      imported, skipped, errors, chunks: chunksCreated,
-      total_files: allFiles.length,
-    }));
+    console.log(
+      JSON.stringify({
+        status: "success",
+        duration_s: parseFloat(totalTime),
+        imported,
+        skipped,
+        errors,
+        chunks: chunksCreated,
+        total_files: allFiles.length,
+      }),
+    );
   } else {
     console.log(`\nImport complete (${totalTime}s):`);
     console.log(`  ${imported} pages imported`);
-    console.log(`  ${skipped} pages skipped (${skipped - errors} unchanged, ${errors} errors)`);
+    console.log(
+      `  ${skipped} pages skipped (${skipped - errors} unchanged, ${errors} errors)`,
+    );
     console.log(`  ${chunksCreated} chunks created`);
   }
 
   // Log the ingest
   await engine.logIngest({
-    source_type: 'directory',
+    source_type: "directory",
     source_ref: dir,
     pages_updated: importedSlugs,
     summary: `Imported ${imported} pages, ${skipped} skipped, ${chunksCreated} chunks`,
@@ -254,8 +316,10 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   // last_run + repo_path either way (those are progress indicators).
   let gitHead: string | null = null;
   try {
-    if (existsSync(join(dir, '.git'))) {
-      gitHead = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+    if (existsSync(join(dir, ".git"))) {
+      gitHead = execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], {
+        encoding: "utf-8",
+      }).trim();
     }
   } catch {
     // Not a git repo or git not available
@@ -266,20 +330,20 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
     // Use gitHead as the commit so a later sync can tell "same broken
     // state as last time" from "new broken state."
     if (failures.length > 0) {
-      const { recordSyncFailures } = await import('../core/sync.ts');
+      const { recordSyncFailures } = await import("../core/sync.ts");
       recordSyncFailures(failures, gitHead);
     }
     if (failures.length === 0) {
-      await engine.setConfig('sync.last_commit', gitHead);
+      await engine.setConfig("sync.last_commit", gitHead);
     } else {
       console.error(
         `\nImport completed with ${failures.length} failure(s). ` +
-        `sync.last_commit NOT advanced — re-run 'gbrain sync' to retry, or ` +
-        `'gbrain sync --skip-failed' to acknowledge and move past them.`,
+          `sync.last_commit NOT advanced — re-run 'gbrain sync' to retry, or ` +
+          `'gbrain sync --skip-failed' to acknowledge and move past them.`,
       );
     }
-    await engine.setConfig('sync.last_run', new Date().toISOString());
-    await engine.setConfig('sync.repo_path', dir);
+    await engine.setConfig("sync.last_run", new Date().toISOString());
+    await engine.setConfig("sync.repo_path", dir);
   }
 
   return { imported, skipped, errors, chunksCreated, failures };
@@ -291,9 +355,9 @@ export function collectMarkdownFiles(dir: string): string[] {
   function walk(d: string) {
     for (const entry of readdirSync(d)) {
       // Skip hidden dirs and .raw dirs
-      if (entry.startsWith('.')) continue;
+      if (entry.startsWith(".")) continue;
       // Skip node_modules
-      if (entry === 'node_modules') continue;
+      if (entry === "node_modules") continue;
 
       const full = join(d, entry);
       let stat;
@@ -322,7 +386,7 @@ export function collectMarkdownFiles(dir: string): string[] {
 
       if (stat.isDirectory()) {
         walk(full);
-      } else if (entry.endsWith('.md') || entry.endsWith('.mdx')) {
+      } else if (entry.endsWith(".md") || entry.endsWith(".mdx")) {
         files.push(full);
       }
     }

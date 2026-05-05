@@ -1,16 +1,22 @@
-import { readFileSync, statSync, lstatSync } from 'fs';
-import { basename } from 'path';
-import { createHash } from 'crypto';
-import { marked } from 'marked';
-import type { BrainEngine } from './engine.ts';
-import { parseMarkdown } from './markdown.ts';
-import { chunkText } from './chunkers/recursive.ts';
-import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
-import { findChunkForOffset } from './chunkers/edge-extractor.ts';
-import { extractCodeRefs } from './link-extraction.ts';
-import { embedBatch } from './embedding.ts';
-import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
-import type { ChunkInput, PageType } from './types.ts';
+import { readFileSync, statSync, lstatSync } from "fs";
+import { basename } from "path";
+import { createHash } from "crypto";
+import { marked } from "marked";
+import type { BrainEngine } from "./engine.ts";
+import { bodyHash } from "./utils.ts";
+import { parseMarkdown } from "./markdown.ts";
+import { chunkText } from "./chunkers/recursive.ts";
+import {
+  chunkCodeText,
+  chunkCodeTextFull,
+  detectCodeLanguage,
+  CHUNKER_VERSION,
+} from "./chunkers/code.ts";
+import { findChunkForOffset } from "./chunkers/edge-extractor.ts";
+import { extractCodeRefs } from "./link-extraction.ts";
+import { embedBatch } from "./embedding.ts";
+import { slugifyPath, slugifyCodePath, isCodeFilePath } from "./sync.ts";
+import type { ChunkInput, PageType } from "./types.ts";
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -30,36 +36,53 @@ import type { ChunkInput, PageType } from './types.ts';
  * Unknown tags return null → fence is skipped (no synthetic chunk).
  */
 const FENCE_TAG_TO_PSEUDO_PATH: Record<string, string> = {
-  ts: 'fence.ts', typescript: 'fence.ts',
-  tsx: 'fence.tsx',
-  js: 'fence.js', javascript: 'fence.js',
-  jsx: 'fence.jsx',
-  py: 'fence.py', python: 'fence.py',
-  rb: 'fence.rb', ruby: 'fence.rb',
-  go: 'fence.go', golang: 'fence.go',
-  rs: 'fence.rs', rust: 'fence.rs',
-  java: 'fence.java',
-  'c#': 'fence.cs', cs: 'fence.cs', csharp: 'fence.cs',
-  cpp: 'fence.cpp', 'c++': 'fence.cpp',
-  c: 'fence.c',
-  php: 'fence.php',
-  swift: 'fence.swift',
-  kt: 'fence.kt', kotlin: 'fence.kt',
-  scala: 'fence.scala',
-  lua: 'fence.lua',
-  ex: 'fence.ex', elixir: 'fence.ex',
-  elm: 'fence.elm',
-  ml: 'fence.ml', ocaml: 'fence.ml',
-  dart: 'fence.dart',
-  zig: 'fence.zig',
-  sol: 'fence.sol', solidity: 'fence.sol',
-  sh: 'fence.sh', bash: 'fence.sh', shell: 'fence.sh', zsh: 'fence.sh',
-  css: 'fence.css',
-  html: 'fence.html',
-  vue: 'fence.vue',
-  json: 'fence.json',
-  yaml: 'fence.yaml', yml: 'fence.yaml',
-  toml: 'fence.toml',
+  ts: "fence.ts",
+  typescript: "fence.ts",
+  tsx: "fence.tsx",
+  js: "fence.js",
+  javascript: "fence.js",
+  jsx: "fence.jsx",
+  py: "fence.py",
+  python: "fence.py",
+  rb: "fence.rb",
+  ruby: "fence.rb",
+  go: "fence.go",
+  golang: "fence.go",
+  rs: "fence.rs",
+  rust: "fence.rs",
+  java: "fence.java",
+  "c#": "fence.cs",
+  cs: "fence.cs",
+  csharp: "fence.cs",
+  cpp: "fence.cpp",
+  "c++": "fence.cpp",
+  c: "fence.c",
+  php: "fence.php",
+  swift: "fence.swift",
+  kt: "fence.kt",
+  kotlin: "fence.kt",
+  scala: "fence.scala",
+  lua: "fence.lua",
+  ex: "fence.ex",
+  elixir: "fence.ex",
+  elm: "fence.elm",
+  ml: "fence.ml",
+  ocaml: "fence.ml",
+  dart: "fence.dart",
+  zig: "fence.zig",
+  sol: "fence.sol",
+  solidity: "fence.sol",
+  sh: "fence.sh",
+  bash: "fence.sh",
+  shell: "fence.sh",
+  zsh: "fence.sh",
+  css: "fence.css",
+  html: "fence.html",
+  vue: "fence.vue",
+  json: "fence.json",
+  yaml: "fence.yaml",
+  yml: "fence.yaml",
+  toml: "fence.toml",
 };
 
 function fenceTagToPseudoPath(lang: string | undefined): string | null {
@@ -74,7 +97,10 @@ function fenceTagToPseudoPath(lang: string | undefined): string | null {
  * `GBRAIN_MAX_FENCES_PER_PAGE` env var if docs-heavy brains legitimately
  * exceed 100 fences on a single page.
  */
-const MAX_FENCES_PER_PAGE = Number.parseInt(process.env.GBRAIN_MAX_FENCES_PER_PAGE || '100', 10);
+const MAX_FENCES_PER_PAGE = Number.parseInt(
+  process.env.GBRAIN_MAX_FENCES_PER_PAGE || "100",
+  10,
+);
 
 /**
  * Walk the marked lexer output and extract recognizable code fences.
@@ -99,14 +125,14 @@ async function extractFencedChunks(
   let fencesSeen = 0;
   let indexOffset = 0;
   for (const tok of tokens) {
-    if (tok.type !== 'code') continue;
-    const code = tok as { type: 'code'; lang?: string; text?: string };
-    const text = (code.text ?? '').trim();
+    if (tok.type !== "code") continue;
+    const code = tok as { type: "code"; lang?: string; text?: string };
+    const text = (code.text ?? "").trim();
     if (!text) continue;
     if (fencesSeen >= MAX_FENCES_PER_PAGE) {
       console.warn(
         `[gbrain] markdown fence cap hit (${MAX_FENCES_PER_PAGE} fences/page); skipping additional fences. ` +
-        `Override via GBRAIN_MAX_FENCES_PER_PAGE env var.`,
+          `Override via GBRAIN_MAX_FENCES_PER_PAGE env var.`,
       );
       break;
     }
@@ -121,7 +147,7 @@ async function extractFencedChunks(
         out.push({
           chunk_index: startChunkIndex + indexOffset++,
           chunk_text: c.text,
-          chunk_source: 'fenced_code',
+          chunk_source: "fenced_code",
           language: c.metadata.language,
           symbol_name: c.metadata.symbolName || undefined,
           symbol_type: c.metadata.symbolType,
@@ -155,7 +181,15 @@ export interface ParsedPage {
 
 export interface ImportResult {
   slug: string;
-  status: 'imported' | 'skipped' | 'error';
+  /**
+   * `imported` — full re-chunk + re-embed (body changed or first import).
+   * `skipped`  — content_hash matches stored, no DB write at all.
+   * `frontmatter_only` (v0.27) — body_hash matches but content_hash differs;
+   *   only the page row's frontmatter + content_hash + body_hash get updated,
+   *   chunks/embeddings/auto-link/auto-timeline are left untouched.
+   * `error`    — failed before completion.
+   */
+  status: "imported" | "skipped" | "frontmatter_only" | "error";
   chunks: number;
   error?: string;
   /**
@@ -190,54 +224,104 @@ export async function importFromContent(
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
   // so the network path behaves identically to the file path.
-  const byteLength = Buffer.byteLength(content, 'utf-8');
+  const byteLength = Buffer.byteLength(content, "utf-8");
   if (byteLength > MAX_FILE_SIZE) {
     return {
       slug,
-      status: 'skipped',
+      status: "skipped",
       chunks: 0,
       error: `Content too large (${byteLength} bytes, max ${MAX_FILE_SIZE}). Split the content into smaller files or remove large embedded assets.`,
     };
   }
 
-  const parsed = parseMarkdown(content, slug + '.md');
+  const parsed = parseMarkdown(content, slug + ".md");
 
   // Hash includes ALL fields for idempotency (not just compiled_truth + timeline)
-  const hash = createHash('sha256')
-    .update(JSON.stringify({
-      title: parsed.title,
+  const hash = createHash("sha256")
+    .update(
+      JSON.stringify({
+        title: parsed.title,
+        type: parsed.type,
+        compiled_truth: parsed.compiled_truth,
+        timeline: parsed.timeline,
+        frontmatter: parsed.frontmatter,
+        tags: parsed.tags.sort(),
+      }),
+    )
+    .digest("hex");
+
+  // v0.27 split-hash fast-path: body_hash excludes frontmatter so a
+  // mapper-only change (e.g. notion-sync writes a new `tier:` field but
+  // the markdown body and tags are byte-identical) can be detected and we
+  // skip the expensive chunking + embedding round-trip. Tag set IS
+  // included so a tag-change still falls through to the full path (tag
+  // reconciliation lives inside the same transaction as upsertChunks).
+  const bodyOnlyHash = bodyHash(
+    {
       type: parsed.type,
+      title: parsed.title,
       compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline,
-      frontmatter: parsed.frontmatter,
-      tags: parsed.tags.sort(),
-    }))
-    .digest('hex');
+      timeline: parsed.timeline || "",
+    },
+    parsed.tags,
+  );
 
   const parsedPage: ParsedPage = {
     type: parsed.type,
     title: parsed.title,
     compiled_truth: parsed.compiled_truth,
-    timeline: parsed.timeline || '',
+    timeline: parsed.timeline || "",
     frontmatter: parsed.frontmatter,
     tags: parsed.tags,
   };
 
   const existing = await engine.getPage(slug);
   if (existing?.content_hash === hash) {
-    return { slug, status: 'skipped', chunks: 0, parsedPage };
+    return { slug, status: "skipped", chunks: 0, parsedPage };
+  }
+
+  // v0.27 fast-path: body unchanged but frontmatter (or content_hash) differs.
+  // Update only the page row's frontmatter + hashes; skip chunking, embedding,
+  // tag reconciliation (tags are folded into body_hash so they're unchanged
+  // here), codeRefs extraction, chunk upsert. createVersion still runs because
+  // frontmatter IS a meaningful versioned change (e.g. trust-tier flip, draft
+  // status). `existing.body_hash` is NULL on rows imported pre-v0.27 — those
+  // fall through to the full path on first encounter so body_hash gets
+  // populated, then subsequent mapper-only writes hit this fast-path.
+  if (existing?.body_hash && existing.body_hash === bodyOnlyHash) {
+    await engine.transaction(async (tx) => {
+      await tx.createVersion(slug);
+      await tx.putPage(slug, {
+        type: parsed.type,
+        title: parsed.title,
+        compiled_truth: parsed.compiled_truth,
+        timeline: parsed.timeline || "",
+        frontmatter: parsed.frontmatter,
+        content_hash: hash,
+        body_hash: bodyOnlyHash,
+      });
+    });
+    return { slug, status: "frontmatter_only", chunks: 0, parsedPage };
   }
 
   // Chunk compiled_truth and timeline
   const chunks: ChunkInput[] = [];
   if (parsed.compiled_truth.trim()) {
     for (const c of chunkText(parsed.compiled_truth)) {
-      chunks.push({ chunk_index: chunks.length, chunk_text: c.text, chunk_source: 'compiled_truth' });
+      chunks.push({
+        chunk_index: chunks.length,
+        chunk_text: c.text,
+        chunk_source: "compiled_truth",
+      });
     }
   }
   if (parsed.timeline?.trim()) {
     for (const c of chunkText(parsed.timeline)) {
-      chunks.push({ chunk_index: chunks.length, chunk_text: c.text, chunk_source: 'timeline' });
+      chunks.push({
+        chunk_index: chunks.length,
+        chunk_text: c.text,
+        chunk_source: "timeline",
+      });
     }
   }
 
@@ -248,20 +332,25 @@ export async function importFromContent(
   // inside prose. Fences that carry an unrecognized lang tag (or no tag)
   // fall through — the prose chunker above already chunked them as text.
   if (parsed.compiled_truth.trim()) {
-    const fenceChunks = await extractFencedChunks(parsed.compiled_truth, chunks.length);
+    const fenceChunks = await extractFencedChunks(
+      parsed.compiled_truth,
+      chunks.length,
+    );
     chunks.push(...fenceChunks);
   }
 
   // Embed BEFORE the transaction (external API call)
   if (!opts.noEmbed && chunks.length > 0) {
     try {
-      const embeddings = await embedBatch(chunks.map(c => c.chunk_text));
+      const embeddings = await embedBatch(chunks.map((c) => c.chunk_text));
       for (let i = 0; i < chunks.length; i++) {
         chunks[i].embedding = embeddings[i];
         chunks[i].token_count = Math.ceil(chunks[i].chunk_text.length / 4);
       }
     } catch (e: unknown) {
-      console.warn(`[gbrain] embedding failed for ${slug} (${chunks.length} chunks): ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(
+        `[gbrain] embedding failed for ${slug} (${chunks.length} chunks): ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
@@ -273,9 +362,12 @@ export async function importFromContent(
       type: parsed.type,
       title: parsed.title,
       compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline || '',
+      timeline: parsed.timeline || "",
       frontmatter: parsed.frontmatter,
       content_hash: hash,
+      // v0.27: persist body_hash on every full-path write so subsequent
+      // mapper-only changes can hit the fast-path above.
+      body_hash: bodyOnlyHash,
     });
 
     // Tag reconciliation: remove stale, add current
@@ -301,28 +393,43 @@ export async function importFromContent(
     // this in v0.18.x), so we wrap each pair in try/catch — guides imported
     // before their code repo syncs are common, and the missing edges land
     // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
-    const codeRefs = extractCodeRefs(parsed.compiled_truth + '\n' + (parsed.timeline || ''));
+    const codeRefs = extractCodeRefs(
+      parsed.compiled_truth + "\n" + (parsed.timeline || ""),
+    );
     for (const ref of codeRefs) {
       const codeSlug = slugifyCodePath(ref.path);
       // Forward: markdown guide → code page (this guide documents that code)
       try {
         await tx.addLink(
-          slug, codeSlug,
+          slug,
+          codeSlug,
           ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
-          'documents', 'markdown', slug, 'compiled_truth',
+          "documents",
+          "markdown",
+          slug,
+          "compiled_truth",
         );
-      } catch { /* code page not yet imported — reconcile-links will catch it */ }
+      } catch {
+        /* code page not yet imported — reconcile-links will catch it */
+      }
       // Reverse: code page → markdown guide (this code is documented by the guide)
       try {
         await tx.addLink(
-          codeSlug, slug,
-          ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
+          codeSlug,
+          slug,
+          ref.path,
+          "documented_by",
+          "markdown",
+          slug,
+          "compiled_truth",
         );
-      } catch { /* same reason — silent skip */ }
+      } catch {
+        /* same reason — silent skip */
+      }
     }
   });
 
-  return { slug, status: 'imported', chunks: chunks.length, parsedPage };
+  return { slug, status: "imported", chunks: chunks.length, parsedPage };
 }
 
 /**
@@ -344,15 +451,25 @@ export async function importFromFile(
   // Defense-in-depth: reject symlinks before reading content.
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {
-    return { slug: relativePath, status: 'skipped', chunks: 0, error: `Skipping symlink: ${filePath}` };
+    return {
+      slug: relativePath,
+      status: "skipped",
+      chunks: 0,
+      error: `Skipping symlink: ${filePath}`,
+    };
   }
 
   const stat = statSync(filePath);
   if (stat.size > MAX_FILE_SIZE) {
-    return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)` };
+    return {
+      slug: relativePath,
+      status: "skipped",
+      chunks: 0,
+      error: `File too large (${stat.size} bytes)`,
+    };
   }
 
-  let content = readFileSync(filePath, 'utf-8');
+  let content = readFileSync(filePath, "utf-8");
 
   // Route code files through the code import path
   if (isCodeFilePath(relativePath)) {
@@ -366,8 +483,11 @@ export async function importFromFile(
   // The inference is applied to the in-memory content only; the file on disk
   // is not modified. Use `gbrain frontmatter generate --fix` to write back.
   if (opts.inferFrontmatter !== false) {
-    const { applyInference } = await import('./frontmatter-inference.ts');
-    const { content: inferred, inferred: meta } = applyInference(relativePath, content);
+    const { applyInference } = await import("./frontmatter-inference.ts");
+    const { content: inferred, inferred: meta } = applyInference(
+      relativePath,
+      content,
+    );
     if (!meta.skipped) {
       content = inferred;
     }
@@ -382,7 +502,7 @@ export async function importFromFile(
   if (parsed.slug !== expectedSlug) {
     return {
       slug: expectedSlug,
-      status: 'skipped',
+      status: "skipped",
       chunks: 0,
       error:
         `Frontmatter slug "${parsed.slug}" does not match path-derived slug "${expectedSlug}" ` +
@@ -407,23 +527,36 @@ export async function importCodeFile(
   opts: { noEmbed?: boolean; force?: boolean } = {},
 ): Promise<ImportResult> {
   const slug = slugifyCodePath(relativePath);
-  const lang = detectCodeLanguage(relativePath) || 'unknown';
+  const lang = detectCodeLanguage(relativePath) || "unknown";
   const title = `${relativePath} (${lang})`;
 
-  const byteLength = Buffer.byteLength(content, 'utf-8');
+  const byteLength = Buffer.byteLength(content, "utf-8");
   if (byteLength > MAX_FILE_SIZE) {
-    return { slug, status: 'skipped', chunks: 0, error: `Code file too large (${byteLength} bytes)` };
+    return {
+      slug,
+      status: "skipped",
+      chunks: 0,
+      error: `Code file too large (${byteLength} bytes)`,
+    };
   }
 
   // Hash for idempotency. CHUNKER_VERSION is folded in so chunker shape
   // changes across releases force clean re-chunks without sync --force.
-  const hash = createHash('sha256')
-    .update(JSON.stringify({ title, type: 'code', content, lang, chunker_version: CHUNKER_VERSION }))
-    .digest('hex');
+  const hash = createHash("sha256")
+    .update(
+      JSON.stringify({
+        title,
+        type: "code",
+        content,
+        lang,
+        chunker_version: CHUNKER_VERSION,
+      }),
+    )
+    .digest("hex");
 
   const existing = await engine.getPage(slug);
   if (!opts.force && existing?.content_hash === hash) {
-    return { slug, status: 'skipped', chunks: 0 };
+    return { slug, status: "skipped", chunks: 0 };
   }
 
   // Chunk via tree-sitter code chunker. The chunker returns per-chunk
@@ -434,11 +567,14 @@ export async function importCodeFile(
   // from the chunker (nested methods carry ['ClassName'] etc.) so the
   // chunk-grain FTS trigger picks up scope for ranking and downstream
   // Layer 5 edge resolution can use scope-qualified identity.
-  const { chunks: codeChunks, edges: extractedEdges } = await chunkCodeTextFull(content, relativePath);
+  const { chunks: codeChunks, edges: extractedEdges } = await chunkCodeTextFull(
+    content,
+    relativePath,
+  );
   const chunks: ChunkInput[] = codeChunks.map((c, i) => ({
     chunk_index: i,
     chunk_text: c.text,
-    chunk_source: 'compiled_truth' as const,
+    chunk_source: "compiled_truth" as const,
     language: c.metadata.language,
     symbol_name: c.metadata.symbolName || undefined,
     symbol_type: c.metadata.symbolType,
@@ -460,7 +596,7 @@ export async function importCodeFile(
   // order), so a matching (chunk_index, text_hash) means a verbatim
   // preserved symbol.
   const existingChunks = existing ? await engine.getChunks(slug) : [];
-  const existingByKey = new Map<string, typeof existingChunks[number]>();
+  const existingByKey = new Map<string, (typeof existingChunks)[number]>();
   for (const ec of existingChunks) {
     existingByKey.set(`${ec.chunk_index}:${ec.chunk_text}`, ec);
   }
@@ -488,7 +624,9 @@ export async function importCodeFile(
         chunks[i]!.token_count = Math.ceil(chunks[i]!.chunk_text.length / 4);
       }
     } catch (e: unknown) {
-      console.warn(`[gbrain] embedding failed for code file ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(
+        `[gbrain] embedding failed for code file ${slug}: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
@@ -497,16 +635,16 @@ export async function importCodeFile(
     if (existing) await tx.createVersion(slug);
 
     await tx.putPage(slug, {
-      type: 'code' as PageType,
-      page_kind: 'code',
+      type: "code" as PageType,
+      page_kind: "code",
       title,
       compiled_truth: content,
-      timeline: '',
+      timeline: "",
       frontmatter: { language: lang, file: relativePath },
       content_hash: hash,
     });
 
-    await tx.addTag(slug, 'code');
+    await tx.addTag(slug, "code");
     await tx.addTag(slug, lang);
 
     if (chunks.length > 0) {
@@ -524,7 +662,15 @@ export async function importCodeFile(
   if (extractedEdges.length > 0 && chunks.length > 0) {
     try {
       const persistedChunks = await engine.getChunks(slug);
-      const byIndex = new Map<number, { id?: number; symbol_name_qualified?: string | null; start_line?: number | null; end_line?: number | null }>();
+      const byIndex = new Map<
+        number,
+        {
+          id?: number;
+          symbol_name_qualified?: string | null;
+          start_line?: number | null;
+          end_line?: number | null;
+        }
+      >();
       for (const pc of persistedChunks) {
         byIndex.set(pc.chunk_index, pc);
       }
@@ -532,8 +678,8 @@ export async function importCodeFile(
       // chunks whose IDs we know, so re-import doesn't leave stale
       // edges pointing at old symbol names.
       const chunkIds = persistedChunks
-        .map(c => c.id)
-        .filter((id): id is number => typeof id === 'number');
+        .map((c) => c.id)
+        .filter((id): id is number => typeof id === "number");
       if (chunkIds.length > 0) {
         await engine.deleteCodeEdgesForChunks(chunkIds);
       }
@@ -549,9 +695,13 @@ export async function importCodeFile(
         };
       });
 
-      const edgeInputs: import('./types.ts').CodeEdgeInput[] = [];
+      const edgeInputs: import("./types.ts").CodeEdgeInput[] = [];
       for (const e of extractedEdges) {
-        const idx = findChunkForOffset(e.callSiteByteOffset, content, rangeList);
+        const idx = findChunkForOffset(
+          e.callSiteByteOffset,
+          content,
+          rangeList,
+        );
         if (idx == null) continue;
         const from = rangeList[idx]!;
         if (!from.id || !from.symbol_name_qualified) continue;
@@ -571,11 +721,13 @@ export async function importCodeFile(
       // Edge persistence is best-effort. A failed addCodeEdges must not
       // fail the overall import — the chunks + embeddings already
       // landed, which is the primary value.
-      console.warn(`[gbrain] edge extraction failed for ${slug}: ${edgeErr instanceof Error ? edgeErr.message : String(edgeErr)}`);
+      console.warn(
+        `[gbrain] edge extraction failed for ${slug}: ${edgeErr instanceof Error ? edgeErr.message : String(edgeErr)}`,
+      );
     }
   }
 
-  return { slug, status: 'imported', chunks: chunks.length };
+  return { slug, status: "imported", chunks: chunks.length };
 }
 
 // Backward compat

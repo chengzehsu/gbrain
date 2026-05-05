@@ -342,7 +342,7 @@ export class PostgresEngine implements BrainEngine {
   async getPage(slug: string): Promise<Page | null> {
     const sql = this.sql;
     const rows = await sql`
-      SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+      SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, body_hash, created_at, updated_at
       FROM pages WHERE slug = ${slug}
     `;
     if (rows.length === 0) return null;
@@ -353,6 +353,7 @@ export class PostgresEngine implements BrainEngine {
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
+    const bodyHash = page.body_hash ?? null;
     const frontmatter = page.frontmatter || {};
 
     // v0.18.0 Step 2: source_id relies on schema DEFAULT 'default'. ON
@@ -361,8 +362,8 @@ export class PostgresEngine implements BrainEngine {
     // notes; multi-source sync (Step 5) will surface an explicit sourceId.
     const pageKind = page.page_kind || "markdown";
     const rows = await sql`
-      INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-      VALUES (${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ""}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
+      INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, body_hash, updated_at)
+      VALUES (${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ""}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, ${bodyHash}, now())
       ON CONFLICT (source_id, slug) DO UPDATE SET
         type = EXCLUDED.type,
         page_kind = EXCLUDED.page_kind,
@@ -371,8 +372,9 @@ export class PostgresEngine implements BrainEngine {
         timeline = EXCLUDED.timeline,
         frontmatter = EXCLUDED.frontmatter,
         content_hash = EXCLUDED.content_hash,
+        body_hash = COALESCE(EXCLUDED.body_hash, pages.body_hash),
         updated_at = now()
-      RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+      RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, body_hash, created_at, updated_at
     `;
     return rowToPage(rows[0]);
   }

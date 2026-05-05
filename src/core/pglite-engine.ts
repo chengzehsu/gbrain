@@ -397,7 +397,7 @@ export class PGLiteEngine implements BrainEngine {
   // Pages CRUD
   async getPage(slug: string): Promise<Page | null> {
     const { rows } = await this.db.query(
-      `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+      `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, body_hash, created_at, updated_at
        FROM pages WHERE slug = $1`,
       [slug],
     );
@@ -408,6 +408,7 @@ export class PGLiteEngine implements BrainEngine {
   async putPage(slug: string, page: PageInput): Promise<Page> {
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
+    const bHash = page.body_hash ?? null;
     const frontmatter = page.frontmatter || {};
 
     // v0.18.0 Step 2: source_id relies on the schema DEFAULT 'default' so
@@ -417,8 +418,8 @@ export class PGLiteEngine implements BrainEngine {
     // surface an explicit sourceId param on putPage for multi-source sync.
     const pageKind = page.page_kind || "markdown";
     const { rows } = await this.db.query(
-      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
+      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, body_hash, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, now())
        ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
          page_kind = EXCLUDED.page_kind,
@@ -427,8 +428,9 @@ export class PGLiteEngine implements BrainEngine {
          timeline = EXCLUDED.timeline,
          frontmatter = EXCLUDED.frontmatter,
          content_hash = EXCLUDED.content_hash,
+         body_hash = COALESCE(EXCLUDED.body_hash, pages.body_hash),
          updated_at = now()
-       RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
+       RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, body_hash, created_at, updated_at`,
       [
         slug,
         page.type,
@@ -438,6 +440,7 @@ export class PGLiteEngine implements BrainEngine {
         page.timeline || "",
         JSON.stringify(frontmatter),
         hash,
+        bHash,
       ],
     );
     return rowToPage(rows[0] as Record<string, unknown>);
