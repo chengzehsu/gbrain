@@ -5,7 +5,27 @@
 // (e.g. "attended meetings" vs "received emails").
 // `code` (v0.19.0): tree-sitter-chunked source files; consumed by code-def /
 // code-refs / code-callers / code-callees + Cathedral II two-pass retrieval.
-export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture' | 'meeting' | 'note' | 'email' | 'slack' | 'calendar-event' | 'code';
+export type PageType =
+  | "person"
+  | "company"
+  | "deal"
+  | "yc"
+  | "civic"
+  | "project"
+  | "concept"
+  | "source"
+  | "media"
+  | "writing"
+  | "analysis"
+  | "guide"
+  | "hardware"
+  | "architecture"
+  | "meeting"
+  | "note"
+  | "email"
+  | "slack"
+  | "calendar-event"
+  | "code";
 
 export interface Page {
   id: number;
@@ -16,11 +36,13 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
+  /** v0.27 split-hash fast-path: hash of body-only fields (no frontmatter). See migration v33. */
+  body_hash?: string;
   created_at: Date;
   updated_at: Date;
 }
 
-export type PageKind = 'markdown' | 'code';
+export type PageKind = "markdown" | "code";
 
 export interface PageInput {
   type: PageType;
@@ -29,6 +51,8 @@ export interface PageInput {
   timeline?: string;
   frontmatter?: Record<string, unknown>;
   content_hash?: string;
+  /** v0.27 split-hash fast-path: hash of body-only fields (no frontmatter). */
+  body_hash?: string;
   /**
    * v0.19.0: distinguishes markdown vs code pages at the DB level. Defaults
    * to 'markdown' when omitted so existing callers work unchanged. Set to
@@ -61,7 +85,7 @@ export interface Chunk {
   page_id: number;
   chunk_index: number;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline' | 'fenced_code';
+  chunk_source: "compiled_truth" | "timeline" | "fenced_code";
   embedding: Float32Array | null;
   model: string;
   token_count: number | null;
@@ -88,7 +112,7 @@ export interface StaleChunkRow {
   slug: string;
   chunk_index: number;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline';
+  chunk_source: "compiled_truth" | "timeline";
   model: string | null;
   token_count: number | null;
 }
@@ -96,7 +120,7 @@ export interface StaleChunkRow {
 export interface ChunkInput {
   chunk_index: number;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline' | 'fenced_code';
+  chunk_source: "compiled_truth" | "timeline" | "fenced_code";
   embedding?: Float32Array;
   model?: string;
   token_count?: number;
@@ -127,7 +151,7 @@ export interface SearchResult {
   title: string;
   type: PageType;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline';
+  chunk_source: "compiled_truth" | "timeline";
   chunk_id: number;
   chunk_index: number;
   score: number;
@@ -157,7 +181,7 @@ export interface SearchOpts {
    * though they're hard-excluded by default.
    */
   include_slug_prefixes?: string[];
-  detail?: 'low' | 'medium' | 'high';
+  detail?: "low" | "medium" | "high";
   /**
    * v0.20.0 Cathedral II: filter by content_chunks.language (e.g., 'typescript',
    * 'python', 'ruby'). Used by `gbrain query --lang <lang>`. NULL/undefined
@@ -365,11 +389,11 @@ export interface BrainHealth {
    * timeline_coverage above to avoid semantic collision (these reflect
    * whole-brain measures used in the score formula).
    */
-  embed_coverage_score: number;     // 0-35
-  link_density_score: number;        // 0-25
-  timeline_coverage_score: number;   // 0-15
-  no_orphans_score: number;          // 0-15
-  no_dead_links_score: number;       // 0-10
+  embed_coverage_score: number; // 0-35
+  link_density_score: number; // 0-25
+  timeline_coverage_score: number; // 0-15
+  no_orphans_score: number; // 0-15
+  no_dead_links_score: number; // 0-10
 }
 
 // Ingest log
@@ -395,7 +419,7 @@ export interface IngestLogInput {
 // eval_capture_failures table records insert failures so gbrain doctor can
 // surface silent capture drops cross-process.
 export interface EvalCandidateInput {
-  tool_name: 'query' | 'search';
+  tool_name: "query" | "search";
   /** Already PII-scrubbed by captureEvalCandidate before this point. */
   query: string;
   retrieved_slugs: string[];
@@ -404,9 +428,9 @@ export interface EvalCandidateInput {
   /** Whether multi-query Haiku expansion was enabled on the call. Null for 'search'. */
   expand_enabled: boolean | null;
   /** The detail level the call requested (pre-auto-detect). */
-  detail: 'low' | 'medium' | 'high' | null;
+  detail: "low" | "medium" | "high" | null;
   /** What hybridSearch actually ran (post-auto-detect). Null for 'search'. */
-  detail_resolved: 'low' | 'medium' | 'high' | null;
+  detail_resolved: "low" | "medium" | "high" | null;
   /** True when vector search actually ran (false when OPENAI_API_KEY missing or embed failed). */
   vector_enabled: boolean;
   /** True when Haiku expansion actually fired. */
@@ -424,11 +448,11 @@ export interface EvalCandidate extends EvalCandidateInput {
 }
 
 export type EvalCaptureFailureReason =
-  | 'db_down'
-  | 'rls_reject'
-  | 'check_violation'
-  | 'scrubber_exception'
-  | 'other';
+  | "db_down"
+  | "rls_reject"
+  | "check_violation"
+  | "scrubber_exception"
+  | "other";
 
 export interface EvalCaptureFailure {
   id: number;
@@ -447,7 +471,7 @@ export interface HybridSearchMeta {
   /** True iff vector search actually ran. False when OPENAI_API_KEY missing or embed failed. */
   vector_enabled: boolean;
   /** Post-auto-detect detail level. */
-  detail_resolved: 'low' | 'medium' | 'high' | null;
+  detail_resolved: "low" | "medium" | "high" | null;
   /** True iff multi-query expansion (Haiku) actually fired and produced variants. */
   expansion_applied: boolean;
 }
@@ -456,7 +480,7 @@ export interface HybridSearchMeta {
 export interface EngineConfig {
   database_url?: string;
   database_path?: string;
-  engine?: 'postgres' | 'pglite';
+  engine?: "postgres" | "pglite";
 }
 
 // Errors
@@ -468,6 +492,6 @@ export class GBrainError extends Error {
     public docs_url?: string,
   ) {
     super(`${problem}: ${cause_description}. Fix: ${fix}`);
-    this.name = 'GBrainError';
+    this.name = "GBrainError";
   }
 }

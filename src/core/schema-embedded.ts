@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS pages (
   timeline      TEXT    NOT NULL DEFAULT '',
   frontmatter   JSONB   NOT NULL DEFAULT '{}',
   content_hash  TEXT,
+  -- v0.27 split-hash fast-path: hash of body-only fields (title, type,
+  -- compiled_truth, timeline, tags) — excludes frontmatter. When incoming
+  -- put_page has matching body_hash but different content_hash, importer
+  -- skips chunking + embedding (expensive) and only updates frontmatter.
+  -- NULL allowed for back-compat with rows imported pre-v0.27; first
+  -- subsequent put_page populates it.
+  body_hash     TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT pages_source_slug_key UNIQUE (source_id, slug)

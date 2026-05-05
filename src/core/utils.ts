@@ -1,18 +1,24 @@
-import { createHash, randomBytes } from 'crypto';
-import type { Page, PageInput, PageType, Chunk, SearchResult } from './types.ts';
+import { createHash, randomBytes } from "crypto";
+import type {
+  Page,
+  PageInput,
+  PageType,
+  Chunk,
+  SearchResult,
+} from "./types.ts";
 
 /**
  * SHA-256 hash a token/secret for storage. Never store plaintext tokens.
  */
 export function hashToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
+  return createHash("sha256").update(token).digest("hex");
 }
 
 /**
  * Generate a cryptographically random token with a prefix.
  */
 export function generateToken(prefix: string): string {
-  return `${prefix}${randomBytes(32).toString('hex')}`;
+  return `${prefix}${randomBytes(32).toString("hex")}`;
 }
 
 /**
@@ -21,7 +27,9 @@ export function generateToken(prefix: string): string {
  */
 export function validateSlug(slug: string): string {
   if (!slug || /(^|\/)\.\.($|\/)/.test(slug) || /^\//.test(slug)) {
-    throw new Error(`Invalid slug: "${slug}". Slugs cannot be empty, start with /, or contain path traversal.`);
+    throw new Error(
+      `Invalid slug: "${slug}". Slugs cannot be empty, start with /, or contain path traversal.`,
+    );
   }
   return slug.toLowerCase();
 }
@@ -31,15 +39,43 @@ export function validateSlug(slug: string): string {
  * Hashes all PageInput fields to match importFromContent's hash algorithm.
  */
 export function contentHash(page: PageInput): string {
-  return createHash('sha256')
-    .update(JSON.stringify({
-      title: page.title,
-      type: page.type,
-      compiled_truth: page.compiled_truth,
-      timeline: page.timeline || '',
-      frontmatter: page.frontmatter || {},
-    }))
-    .digest('hex');
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        title: page.title,
+        type: page.type,
+        compiled_truth: page.compiled_truth,
+        timeline: page.timeline || "",
+        frontmatter: page.frontmatter || {},
+      }),
+    )
+    .digest("hex");
+}
+
+/**
+ * v0.27 split-hash fast-path. Body-only hash (excludes frontmatter) for use
+ * by importFromContent: when an incoming page's body_hash matches the
+ * stored body_hash but content_hash differs, only frontmatter changed and
+ * we can skip chunking + embedding (the expensive operations) entirely.
+ *
+ * Tags are intentionally included in body_hash because tag changes mean
+ * the page surface area changed (tag-based filters return different
+ * results), even though chunks themselves don't change. Including tags
+ * here keeps the fast-path conservative: if tags shift we re-run the
+ * full path so tag reconciliation hits the same code path as before.
+ */
+export function bodyHash(page: PageInput, tags: string[] = []): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        title: page.title,
+        type: page.type,
+        compiled_truth: page.compiled_truth,
+        timeline: page.timeline || "",
+        tags: [...tags].sort(),
+      }),
+    )
+    .digest("hex");
 }
 
 export function rowToPage(row: Record<string, unknown>): Page {
@@ -50,8 +86,11 @@ export function rowToPage(row: Record<string, unknown>): Page {
     title: row.title as string,
     compiled_truth: row.compiled_truth as string,
     timeline: row.timeline as string,
-    frontmatter: (typeof row.frontmatter === 'string' ? JSON.parse(row.frontmatter) : row.frontmatter) as Record<string, unknown>,
+    frontmatter: (typeof row.frontmatter === "string"
+      ? JSON.parse(row.frontmatter)
+      : row.frontmatter) as Record<string, unknown>,
     content_hash: row.content_hash as string | undefined,
+    body_hash: row.body_hash as string | undefined,
     created_at: new Date(row.created_at as string),
     updated_at: new Date(row.updated_at as string),
   };
@@ -75,25 +114,29 @@ export function parseEmbedding(value: unknown): Float32Array | null {
   if (value instanceof Float32Array) return value;
   if (Array.isArray(value)) {
     if (value.length === 0) return new Float32Array(0);
-    if (typeof value[0] !== 'number') {
-      throw new Error(`parseEmbedding: array contains non-numeric element (${typeof value[0]})`);
+    if (typeof value[0] !== "number") {
+      throw new Error(
+        `parseEmbedding: array contains non-numeric element (${typeof value[0]})`,
+      );
     }
     return Float32Array.from(value as number[]);
   }
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     const trimmed = value.trim();
     // Plain non-vector strings: treat as "no embedding here", return null.
     // Strings that LOOK like vector literals but contain garbage: throw,
     // because that's a real corruption signal worth surfacing loudly.
-    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return null;
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
     const inner = trimmed.slice(1, -1).trim();
     if (inner.length === 0) return new Float32Array(0);
-    const parts = inner.split(',');
+    const parts = inner.split(",");
     const out = new Float32Array(parts.length);
     for (let i = 0; i < parts.length; i++) {
       const n = Number(parts[i].trim());
       if (!Number.isFinite(n)) {
-        throw new Error(`parseEmbedding: non-finite value at index ${i}: ${parts[i]}`);
+        throw new Error(
+          `parseEmbedding: non-finite value at index ${i}: ${parts[i]}`,
+        );
       }
       out[i] = n;
     }
@@ -118,19 +161,27 @@ export function tryParseEmbedding(value: unknown): Float32Array | null {
     if (!_tryParseEmbeddingWarned) {
       _tryParseEmbeddingWarned = true;
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`tryParseEmbedding: skipping corrupt embedding row (${msg}). Further warnings suppressed this session.`);
+      console.warn(
+        `tryParseEmbedding: skipping corrupt embedding row (${msg}). Further warnings suppressed this session.`,
+      );
     }
     return null;
   }
 }
 
-export function rowToChunk(row: Record<string, unknown>, includeEmbedding = false): Chunk {
+export function rowToChunk(
+  row: Record<string, unknown>,
+  includeEmbedding = false,
+): Chunk {
   return {
     id: row.id as number,
     page_id: row.page_id as number,
     chunk_index: row.chunk_index as number,
     chunk_text: row.chunk_text as string,
-    chunk_source: row.chunk_source as 'compiled_truth' | 'timeline' | 'fenced_code',
+    chunk_source: row.chunk_source as
+      | "compiled_truth"
+      | "timeline"
+      | "fenced_code",
     embedding: includeEmbedding ? parseEmbedding(row.embedding) : null,
     model: row.model as string,
     token_count: row.token_count as number | null,
@@ -142,9 +193,11 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
     start_line: (row.start_line as number | null | undefined) ?? null,
     end_line: (row.end_line as number | null | undefined) ?? null,
     // v0.20.0 Cathedral II Layer 1 additions (nullable for markdown chunks).
-    parent_symbol_path: (row.parent_symbol_path as string[] | null | undefined) ?? null,
+    parent_symbol_path:
+      (row.parent_symbol_path as string[] | null | undefined) ?? null,
     doc_comment: (row.doc_comment as string | null | undefined) ?? null,
-    symbol_name_qualified: (row.symbol_name_qualified as string | null | undefined) ?? null,
+    symbol_name_qualified:
+      (row.symbol_name_qualified as string | null | undefined) ?? null,
   };
 }
 
@@ -155,7 +208,7 @@ export function rowToSearchResult(row: Record<string, unknown>): SearchResult {
     title: row.title as string,
     type: row.type as PageType,
     chunk_text: row.chunk_text as string,
-    chunk_source: row.chunk_source as 'compiled_truth' | 'timeline',
+    chunk_source: row.chunk_source as "compiled_truth" | "timeline",
     chunk_id: row.chunk_id as number,
     chunk_index: row.chunk_index as number,
     score: Number(row.score),
@@ -165,7 +218,7 @@ export function rowToSearchResult(row: Record<string, unknown>): SearchResult {
   // SELECTs. Keep the field optional so pre-v0.17 engines that didn't
   // join sources don't crash on the absent column — rowToSearchResult
   // is shared by both paths.
-  if (typeof row.source_id === 'string') {
+  if (typeof row.source_id === "string") {
     result.source_id = row.source_id;
   }
   return result;
