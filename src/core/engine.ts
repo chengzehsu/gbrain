@@ -1,18 +1,32 @@
 import type {
-  Page, PageInput, PageFilters,
-  Chunk, ChunkInput, StaleChunkRow,
-  SearchResult, SearchOpts,
-  Link, GraphNode, GraphPath,
-  TimelineEntry, TimelineInput, TimelineOpts,
+  Page,
+  PageInput,
+  PageFilters,
+  Chunk,
+  ChunkInput,
+  StaleChunkRow,
+  SearchResult,
+  SearchOpts,
+  Link,
+  GraphNode,
+  GraphPath,
+  TimelineEntry,
+  TimelineInput,
+  TimelineOpts,
   RawData,
   PageVersion,
-  BrainStats, BrainHealth,
-  IngestLogEntry, IngestLogInput,
+  BrainStats,
+  BrainHealth,
+  IngestLogEntry,
+  IngestLogInput,
   EngineConfig,
-  CodeEdgeInput, CodeEdgeResult,
-  EvalCandidate, EvalCandidateInput,
-  EvalCaptureFailure, EvalCaptureFailureReason,
-} from './types.ts';
+  CodeEdgeInput,
+  CodeEdgeResult,
+  EvalCandidate,
+  EvalCandidateInput,
+  EvalCaptureFailure,
+  EvalCaptureFailureReason,
+} from "./types.ts";
 
 /** Input row for addLinksBatch. Optional fields default to '' (matches NOT NULL DDL). */
 export interface LinkBatchInput {
@@ -85,7 +99,10 @@ export interface TimelineBatchInput {
  * transaction itself is waiting to write.
  */
 export interface ReservedConnection {
-  executeRaw<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  executeRaw<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<T[]>;
 }
 
 /** Dream-cycle Haiku verdict on whether a transcript is worth processing. */
@@ -105,15 +122,25 @@ export interface DreamVerdictInput {
 export const MAX_SEARCH_LIMIT = 100;
 
 /** Clamp a user-provided search limit to a safe range. */
-export function clampSearchLimit(limit: number | undefined, defaultLimit = 20, cap = MAX_SEARCH_LIMIT): number {
-  if (limit === undefined || limit === null || !Number.isFinite(limit) || Number.isNaN(limit)) return defaultLimit;
+export function clampSearchLimit(
+  limit: number | undefined,
+  defaultLimit = 20,
+  cap = MAX_SEARCH_LIMIT,
+): number {
+  if (
+    limit === undefined ||
+    limit === null ||
+    !Number.isFinite(limit) ||
+    Number.isNaN(limit)
+  )
+    return defaultLimit;
   if (limit <= 0) return defaultLimit;
   return Math.min(Math.floor(limit), cap);
 }
 
 export interface BrainEngine {
   /** Discriminator: lets migrations and other consumers branch on engine kind without instanceof + dynamic imports. */
-  readonly kind: 'postgres' | 'pglite';
+  readonly kind: "postgres" | "pglite";
 
   // Lifecycle
   connect(config: EngineConfig): Promise<void>;
@@ -125,7 +152,9 @@ export interface BrainEngine {
    * PGLite: pass-through). See `ReservedConnection` for semantics and
    * usage constraints. Release is automatic.
    */
-  withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T>;
+  withReservedConnection<T>(
+    fn: (conn: ReservedConnection) => Promise<T>,
+  ): Promise<T>;
 
   // Pages CRUD
   getPage(slug: string): Promise<Page | null>;
@@ -142,7 +171,10 @@ export interface BrainEngine {
 
   // Search
   searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]>;
-  searchVector(embedding: Float32Array, opts?: SearchOpts): Promise<SearchResult[]>;
+  searchVector(
+    embedding: Float32Array,
+    opts?: SearchOpts,
+  ): Promise<SearchResult[]>;
   getEmbeddingsByChunkIds(ids: number[]): Promise<Map<number, Float32Array>>;
 
   // Chunks
@@ -195,7 +227,12 @@ export interface BrainEngine {
    * 'manual') — used by runAutoLink reconciliation to avoid deleting edges from
    * other provenances when pruning frontmatter-derived edges.
    */
-  removeLink(from: string, to: string, linkType?: string, linkSource?: string): Promise<void>;
+  removeLink(
+    from: string,
+    to: string,
+    linkType?: string,
+    linkSource?: string,
+  ): Promise<void>;
   getLinks(slug: string): Promise<Link[]>;
   getBacklinks(slug: string): Promise<Link[]>;
   /**
@@ -227,7 +264,11 @@ export interface BrainEngine {
    */
   traversePaths(
     slug: string,
-    opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both' },
+    opts?: {
+      depth?: number;
+      linkType?: string;
+      direction?: "in" | "out" | "both";
+    },
   ): Promise<GraphPath[]>;
   /**
    * For a list of slugs, return how many inbound links each has.
@@ -236,12 +277,21 @@ export interface BrainEngine {
    */
   getBacklinkCounts(slugs: string[]): Promise<Map<string, number>>;
   /**
+   * Batch fetch trust tier (frontmatter.tier) for the given slugs.
+   * Returns Map<slug, tier> with tier in {0,1,2,3} where 0 = unset/unknown.
+   * Used by hybridSearch to apply server-side tier-aware boost (Path B).
+   * Mirrors getBacklinkCounts pattern: single query, no N+1.
+   */
+  getTiersForSlugs(slugs: string[]): Promise<Map<string, number>>;
+  /**
    * Return every page with no inbound links (from any source).
    * Domain comes from the frontmatter `domain` field (null if unset).
    * The caller filters pseudo-pages + derives display domain.
    * Used by `gbrain orphans` and `runCycle`'s orphan sweep phase.
    */
-  findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>>;
+  findOrphanPages(): Promise<
+    Array<{ slug: string; title: string; domain: string | null }>
+  >;
 
   // Tags
   addTag(slug: string, tag: string): Promise<void>;
@@ -276,8 +326,15 @@ export interface BrainEngine {
   // Dream-cycle significance verdict cache (v0.23).
   // Keyed by (file_path, content_hash). Distinct from raw_data, which is
   // page-scoped — transcripts being judged aren't pages yet.
-  getDreamVerdict(filePath: string, contentHash: string): Promise<DreamVerdict | null>;
-  putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void>;
+  getDreamVerdict(
+    filePath: string,
+    contentHash: string,
+  ): Promise<DreamVerdict | null>;
+  putDreamVerdict(
+    filePath: string,
+    contentHash: string,
+    verdict: DreamVerdictInput,
+  ): Promise<void>;
 
   // Versions
   createVersion(slug: string): Promise<PageVersion>;
@@ -305,7 +362,10 @@ export interface BrainEngine {
   getChunksWithEmbeddings(slug: string): Promise<Chunk[]>;
 
   // Raw SQL (for Minions job queue and other internal modules)
-  executeRaw<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  executeRaw<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<T[]>;
 
   // ============================================================
   // v0.20.0 Cathedral II: code edges (Layer 5 populates, Layer 7 consumes)
@@ -355,7 +415,11 @@ export interface BrainEngine {
    */
   getEdgesByChunk(
     chunkId: number,
-    opts?: { direction?: 'in' | 'out' | 'both'; edgeType?: string; limit?: number },
+    opts?: {
+      direction?: "in" | "out" | "both";
+      edgeType?: string;
+      limit?: number;
+    },
   ): Promise<CodeEdgeResult[]>;
 
   /**
@@ -364,7 +428,10 @@ export interface BrainEngine {
    * by A2 two-pass retrieval as its anchor source. Most callers should
    * prefer searchKeyword (external contract: page-grain best-chunk-per-page).
    */
-  searchKeywordChunks(query: string, opts?: SearchOpts): Promise<SearchResult[]>;
+  searchKeywordChunks(
+    query: string,
+    opts?: SearchOpts,
+  ): Promise<SearchResult[]>;
 
   // Eval capture (v0.25.0 — BrainBench-Real substrate).
   // Captured at the op-layer wrapper in src/core/operations.ts; reads via
@@ -374,11 +441,17 @@ export interface BrainEngine {
   /** Insert a captured candidate. Returns the new row id. Best-effort: callers swallow failures and route them through `logEvalCaptureFailure`. */
   logEvalCandidate(input: EvalCandidateInput): Promise<number>;
   /** Read candidates by time window / limit / tool filter. Used by `gbrain eval export`. */
-  listEvalCandidates(filter?: { since?: Date; limit?: number; tool?: 'query' | 'search' }): Promise<EvalCandidate[]>;
+  listEvalCandidates(filter?: {
+    since?: Date;
+    limit?: number;
+    tool?: "query" | "search";
+  }): Promise<EvalCandidate[]>;
   /** Delete candidates created before `date`. Returns rows deleted. Used by `gbrain eval prune`. */
   deleteEvalCandidatesBefore(date: Date): Promise<number>;
   /** Log a capture failure so `gbrain doctor` can surface drops cross-process. Best-effort; symmetric with logEvalCandidate (failure-of-failure is lost). */
   logEvalCaptureFailure(reason: EvalCaptureFailureReason): Promise<void>;
   /** Read capture failures within an optional time window. Used by `gbrain doctor`. */
-  listEvalCaptureFailures(filter?: { since?: Date }): Promise<EvalCaptureFailure[]>;
+  listEvalCaptureFailures(filter?: {
+    since?: Date;
+  }): Promise<EvalCaptureFailure[]>;
 }

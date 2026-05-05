@@ -1,28 +1,60 @@
-import postgres from 'postgres';
-import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection, DreamVerdict, DreamVerdictInput } from './engine.ts';
-import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
-import { runMigrations } from './migrate.ts';
-import { SCHEMA_SQL } from './schema-embedded.ts';
-import { verifySchema } from './schema-verify.ts';
+import postgres from "postgres";
 import type {
-  Page, PageInput, PageFilters, PageType,
-  Chunk, ChunkInput, StaleChunkRow,
-  SearchResult, SearchOpts,
-  Link, GraphNode, GraphPath,
-  TimelineEntry, TimelineInput, TimelineOpts,
+  BrainEngine,
+  LinkBatchInput,
+  TimelineBatchInput,
+  ReservedConnection,
+  DreamVerdict,
+  DreamVerdictInput,
+} from "./engine.ts";
+import { MAX_SEARCH_LIMIT, clampSearchLimit } from "./engine.ts";
+import { runMigrations } from "./migrate.ts";
+import { SCHEMA_SQL } from "./schema-embedded.ts";
+import { verifySchema } from "./schema-verify.ts";
+import type {
+  Page,
+  PageInput,
+  PageFilters,
+  PageType,
+  Chunk,
+  ChunkInput,
+  StaleChunkRow,
+  SearchResult,
+  SearchOpts,
+  Link,
+  GraphNode,
+  GraphPath,
+  TimelineEntry,
+  TimelineInput,
+  TimelineOpts,
   RawData,
   PageVersion,
-  BrainStats, BrainHealth,
-  IngestLogEntry, IngestLogInput,
+  BrainStats,
+  BrainHealth,
+  IngestLogEntry,
+  IngestLogInput,
   EngineConfig,
-  EvalCandidate, EvalCandidateInput,
-  EvalCaptureFailure, EvalCaptureFailureReason,
-} from './types.ts';
-import { GBrainError } from './types.ts';
-import * as db from './db.ts';
-import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding } from './utils.ts';
-import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
-import { buildSourceFactorCase, buildHardExcludeClause } from './search/sql-ranking.ts';
+  EvalCandidate,
+  EvalCandidateInput,
+  EvalCaptureFailure,
+  EvalCaptureFailureReason,
+} from "./types.ts";
+import { GBrainError } from "./types.ts";
+import * as db from "./db.ts";
+import {
+  validateSlug,
+  contentHash,
+  rowToPage,
+  rowToChunk,
+  rowToSearchResult,
+  parseEmbedding,
+  tryParseEmbedding,
+} from "./utils.ts";
+import { resolveBoostMap, resolveHardExcludes } from "./search/source-boost.ts";
+import {
+  buildSourceFactorCase,
+  buildHardExcludeClause,
+} from "./search/sql-ranking.ts";
 
 // CONNECTION_ERROR_PATTERNS / isConnectionError were used by the per-call
 // executeRaw retry that #406 originally shipped. Eng-review D3 dropped that
@@ -35,7 +67,7 @@ import { buildSourceFactorCase, buildHardExcludeClause } from './search/sql-rank
 // follow-up that will reintroduce a typed retry mechanism.
 
 export class PostgresEngine implements BrainEngine {
-  readonly kind = 'postgres' as const;
+  readonly kind = "postgres" as const;
   private _sql: ReturnType<typeof postgres> | null = null;
   /** Saved config for reconnection. */
   private _savedConfig: (EngineConfig & { poolSize?: number }) | null = null;
@@ -56,8 +88,16 @@ export class PostgresEngine implements BrainEngine {
       // GBRAIN_POOL_SIZE cap below the caller's requested size when set — the
       // env var is a user escape hatch, so it wins.
       const url = config.database_url;
-      if (!url) throw new GBrainError('No database URL', 'database_url is missing', 'Provide --url');
-      const size = Math.min(config.poolSize, db.resolvePoolSize(config.poolSize));
+      if (!url)
+        throw new GBrainError(
+          "No database URL",
+          "database_url is missing",
+          "Provide --url",
+        );
+      const size = Math.min(
+        config.poolSize,
+        db.resolvePoolSize(config.poolSize),
+      );
       // Honor PgBouncer transaction-mode detection on worker-instance pools too.
       // Without this, `gbrain jobs work` against a Supabase pooler URL hits
       // "prepared statement does not exist" under load just like the module
@@ -77,7 +117,7 @@ export class PostgresEngine implements BrainEngine {
       if (Object.keys(timeouts).length > 0) {
         opts.connection = timeouts;
       }
-      if (typeof prepare === 'boolean') {
+      if (typeof prepare === "boolean") {
         opts.prepare = prepare;
       }
       this._sql = postgres(url, opts);
@@ -134,7 +174,9 @@ export class PostgresEngine implements BrainEngine {
       // Self-heals missing columns via ALTER TABLE ADD COLUMN IF NOT EXISTS.
       const verify = await verifySchema(this);
       if (verify.healed.length > 0) {
-        console.log(`  Schema verify: self-healed ${verify.healed.length} missing column(s)`);
+        console.log(
+          `  Schema verify: self-healed ${verify.healed.length} missing column(s)`,
+        );
       }
     } finally {
       await conn`SELECT pg_advisory_unlock(42)`;
@@ -163,16 +205,18 @@ export class PostgresEngine implements BrainEngine {
     // Single round-trip probe for every forward-reference target.
     // current_schema() resolves to whatever search_path the connection uses,
     // which matches schema-embedded.ts's `public.` references.
-    const probeRows = await conn<{
-      pages_exists: boolean;
-      source_id_exists: boolean;
-      links_exists: boolean;
-      link_source_exists: boolean;
-      origin_page_id_exists: boolean;
-      chunks_exists: boolean;
-      symbol_name_exists: boolean;
-      language_exists: boolean;
-    }[]>`
+    const probeRows = await conn<
+      {
+        pages_exists: boolean;
+        source_id_exists: boolean;
+        links_exists: boolean;
+        link_source_exists: boolean;
+        origin_page_id_exists: boolean;
+        chunks_exists: boolean;
+        symbol_name_exists: boolean;
+        language_exists: boolean;
+      }[]
+    >`
       SELECT
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'pages') AS pages_exists,
@@ -194,14 +238,19 @@ export class PostgresEngine implements BrainEngine {
     const probe = probeRows[0]!;
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
-    const needsLinksBootstrap = probe.links_exists
-      && (!probe.link_source_exists || !probe.origin_page_id_exists);
-    const needsChunksBootstrap = probe.chunks_exists
-      && (!probe.symbol_name_exists || !probe.language_exists);
+    const needsLinksBootstrap =
+      probe.links_exists &&
+      (!probe.link_source_exists || !probe.origin_page_id_exists);
+    const needsChunksBootstrap =
+      probe.chunks_exists &&
+      (!probe.symbol_name_exists || !probe.language_exists);
 
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap) return;
+    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap)
+      return;
 
-    console.log('  Pre-v0.21 brain detected, applying forward-reference bootstrap');
+    console.log(
+      "  Pre-v0.21 brain detected, applying forward-reference bootstrap",
+    );
 
     if (needsPagesBootstrap) {
       // Mirror schema-embedded.ts's `sources` shape so the subsequent
@@ -253,21 +302,33 @@ export class PostgresEngine implements BrainEngine {
     return conn.begin(async (tx) => {
       // Create a scoped engine with tx as its connection, no shared state mutation
       const txEngine = Object.create(this) as PostgresEngine;
-      Object.defineProperty(txEngine, 'sql', { get: () => tx });
-      Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
+      Object.defineProperty(txEngine, "sql", { get: () => tx });
+      Object.defineProperty(txEngine, "_sql", {
+        value: tx as unknown as ReturnType<typeof postgres>,
+        writable: false,
+      });
       return fn(txEngine);
     }) as Promise<T>;
   }
 
-  async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
+  async withReservedConnection<T>(
+    fn: (conn: ReservedConnection) => Promise<T>,
+  ): Promise<T> {
     const pool = this._sql || db.getConnection();
     const reserved = await pool.reserve();
     try {
       const conn: ReservedConnection = {
-        async executeRaw<R = Record<string, unknown>>(query: string, params?: unknown[]): Promise<R[]> {
-          const rows = params === undefined
-            ? await reserved.unsafe(query)
-            : await reserved.unsafe(query, params as Parameters<typeof reserved.unsafe>[1]);
+        async executeRaw<R = Record<string, unknown>>(
+          query: string,
+          params?: unknown[],
+        ): Promise<R[]> {
+          const rows =
+            params === undefined
+              ? await reserved.unsafe(query)
+              : await reserved.unsafe(
+                  query,
+                  params as Parameters<typeof reserved.unsafe>[1],
+                );
           return rows as unknown as R[];
         },
       };
@@ -298,10 +359,10 @@ export class PostgresEngine implements BrainEngine {
     // CONFLICT target becomes (source_id, slug) since global UNIQUE(slug)
     // was dropped in migration v17. See pglite-engine.ts for matching
     // notes; multi-source sync (Step 5) will surface an explicit sourceId.
-    const pageKind = page.page_kind || 'markdown';
+    const pageKind = page.page_kind || "markdown";
     const rows = await sql`
       INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-      VALUES (${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
+      VALUES (${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ""}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
       ON CONFLICT (source_id, slug) DO UPDATE SET
         type = EXCLUDED.type,
         page_kind = EXCLUDED.page_kind,
@@ -332,15 +393,19 @@ export class PostgresEngine implements BrainEngine {
     // we use postgres.js's tagged-template chaining via sql`` fragments instead.
 
     // Build conditions with sql fragments. postgres.js supports fragment composition.
-    const typeCondition = filters?.type ? sql`AND p.type = ${filters.type}` : sql``;
+    const typeCondition = filters?.type
+      ? sql`AND p.type = ${filters.type}`
+      : sql``;
     const tagJoin = filters?.tag ? sql`JOIN tags t ON t.page_id = p.id` : sql``;
     const tagCondition = filters?.tag ? sql`AND t.tag = ${filters.tag}` : sql``;
-    const updatedCondition = updatedAfter ? sql`AND p.updated_at > ${updatedAfter}::timestamptz` : sql``;
+    const updatedCondition = updatedAfter
+      ? sql`AND p.updated_at > ${updatedAfter}::timestamptz`
+      : sql``;
     // slugPrefix uses the (source_id, slug) UNIQUE btree index for range scans.
     // Escape LIKE metacharacters so the user prefix is treated as a literal.
     const slugPrefix = filters?.slugPrefix;
     const slugCondition = slugPrefix
-      ? sql`AND p.slug LIKE ${slugPrefix.replace(/[\\%_]/g, (c) => '\\' + c) + '%'} ESCAPE '\\'`
+      ? sql`AND p.slug LIKE ${slugPrefix.replace(/[\\%_]/g, (c) => "\\" + c) + "%"} ESCAPE '\\'`
       : sql``;
 
     const rows = await sql`
@@ -370,7 +435,7 @@ export class PostgresEngine implements BrainEngine {
     const fuzzy = await sql`
       SELECT slug, similarity(title, ${partial}) AS sim
       FROM pages
-      WHERE title % ${partial} OR slug ILIKE ${'%' + partial + '%'}
+      WHERE title % ${partial} OR slug ILIKE ${"%" + partial + "%"}
       ORDER BY sim DESC
       LIMIT 5
     `;
@@ -383,7 +448,10 @@ export class PostgresEngine implements BrainEngine {
   // preserves the v0.19.0 contract so backlinks / enrichment-service /
   // list_pages etc. see zero breaking changes. A2 two-pass (Layer 7)
   // consumes searchKeywordChunks for the raw chunk-grain primitive.
-  async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
+  async searchKeyword(
+    query: string,
+    opts?: SearchOpts,
+  ): Promise<SearchResult[]> {
     const sql = this.sql;
     const limit = clampSearchLimit(opts?.limit);
     const offset = opts?.offset || 0;
@@ -393,10 +461,12 @@ export class PostgresEngine implements BrainEngine {
     const symbolKind = opts?.symbolKind;
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
-      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+      console.warn(
+        `[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`,
+      );
     }
 
-    const detailLow = opts?.detail === 'low';
+    const detailLow = opts?.detail === "low";
     // Fetch headroom for dedup: if we only fetch `limit` chunks, a cluster of
     // co-occurring terms in one page can eat the entire result set and we'd
     // ship < limit pages. 3x gives dedup enough to pick top N distinct pages.
@@ -410,27 +480,37 @@ export class PostgresEngine implements BrainEngine {
     // (test/, archive/, attachments/, .raw/ by default) filter at the
     // chunk-rank stage so they never enter the candidate set.
     const boostMap = resolveBoostMap();
-    const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
-    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
-    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+    const sourceFactorCase = buildSourceFactorCase(
+      "p.slug",
+      boostMap,
+      opts?.detail,
+    );
+    const hardExcludePrefixes = resolveHardExcludes(
+      opts?.exclude_slug_prefixes,
+      opts?.include_slug_prefixes,
+    );
+    const hardExcludeClause = buildHardExcludeClause(
+      "p.slug",
+      hardExcludePrefixes,
+    );
 
     const params: unknown[] = [query];
-    let typeClause = '';
+    let typeClause = "";
     if (type) {
       params.push(type);
       typeClause = `AND p.type = $${params.length}`;
     }
-    let excludeSlugsClause = '';
+    let excludeSlugsClause = "";
     if (excludeSlugs?.length) {
       params.push(excludeSlugs);
       excludeSlugsClause = `AND p.slug != ALL($${params.length}::text[])`;
     }
-    let languageClause = '';
+    let languageClause = "";
     if (language) {
       params.push(language);
       languageClause = `AND cc.language = $${params.length}`;
     }
-    let symbolKindClause = '';
+    let symbolKindClause = "";
     if (symbolKind) {
       params.push(symbolKind);
       symbolKindClause = `AND cc.symbol_type = $${params.length}`;
@@ -453,7 +533,7 @@ export class PostgresEngine implements BrainEngine {
         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
           ${typeClause}
           ${excludeSlugsClause}
-          ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
+          ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ""}
           ${languageClause}
           ${symbolKindClause}
           ${hardExcludeClause}
@@ -476,9 +556,12 @@ export class PostgresEngine implements BrainEngine {
 
     // Search-only timeout. SET LOCAL inside sql.begin() scopes the GUC
     // to the transaction so it can never leak onto a pooled connection.
-    const rows = await sql.begin(async sql => {
+    const rows = await sql.begin(async (sql) => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
+      return await sql.unsafe(
+        rawQuery,
+        params as Parameters<typeof sql.unsafe>[1],
+      );
     });
     return rows.map(rowToSearchResult);
   }
@@ -492,18 +575,23 @@ export class PostgresEngine implements BrainEngine {
    * Most callers should prefer searchKeyword (external page-grain
    * contract). This is intentionally a narrow internal knob.
    */
-  async searchKeywordChunks(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
+  async searchKeywordChunks(
+    query: string,
+    opts?: SearchOpts,
+  ): Promise<SearchResult[]> {
     const sql = this.sql;
     const limit = clampSearchLimit(opts?.limit);
     const offset = opts?.offset || 0;
     const type = opts?.type;
     const excludeSlugs = opts?.exclude_slugs;
-    const detailLow = opts?.detail === 'low';
+    const detailLow = opts?.detail === "low";
     const language = opts?.language;
     const symbolKind = opts?.symbolKind;
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
-      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+      console.warn(
+        `[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`,
+      );
     }
 
     // Source-aware ranking applies here too — searchKeywordChunks is the
@@ -511,27 +599,37 @@ export class PostgresEngine implements BrainEngine {
     // so curated-vs-bulk dampening should affect the anchor pool. Same
     // detail-gate, same hard-exclude behavior as searchKeyword.
     const boostMap = resolveBoostMap();
-    const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
-    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
-    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+    const sourceFactorCase = buildSourceFactorCase(
+      "p.slug",
+      boostMap,
+      opts?.detail,
+    );
+    const hardExcludePrefixes = resolveHardExcludes(
+      opts?.exclude_slug_prefixes,
+      opts?.include_slug_prefixes,
+    );
+    const hardExcludeClause = buildHardExcludeClause(
+      "p.slug",
+      hardExcludePrefixes,
+    );
 
     const params: unknown[] = [query];
-    let typeClause = '';
+    let typeClause = "";
     if (type) {
       params.push(type);
       typeClause = `AND p.type = $${params.length}`;
     }
-    let excludeSlugsClause = '';
+    let excludeSlugsClause = "";
     if (excludeSlugs?.length) {
       params.push(excludeSlugs);
       excludeSlugsClause = `AND p.slug != ALL($${params.length}::text[])`;
     }
-    let languageClause = '';
+    let languageClause = "";
     if (language) {
       params.push(language);
       languageClause = `AND cc.language = $${params.length}`;
     }
-    let symbolKindClause = '';
+    let symbolKindClause = "";
     if (symbolKind) {
       params.push(symbolKind);
       symbolKindClause = `AND cc.symbol_type = $${params.length}`;
@@ -552,7 +650,7 @@ export class PostgresEngine implements BrainEngine {
       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
         ${typeClause}
         ${excludeSlugsClause}
-        ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
+        ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ""}
         ${languageClause}
         ${symbolKindClause}
         ${hardExcludeClause}
@@ -561,28 +659,36 @@ export class PostgresEngine implements BrainEngine {
       OFFSET ${offsetParam}
     `;
 
-    const rows = await sql.begin(async sql => {
+    const rows = await sql.begin(async (sql) => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
+      return await sql.unsafe(
+        rawQuery,
+        params as Parameters<typeof sql.unsafe>[1],
+      );
     });
     return rows.map(rowToSearchResult);
   }
 
-  async searchVector(embedding: Float32Array, opts?: SearchOpts): Promise<SearchResult[]> {
+  async searchVector(
+    embedding: Float32Array,
+    opts?: SearchOpts,
+  ): Promise<SearchResult[]> {
     const sql = this.sql;
     const limit = clampSearchLimit(opts?.limit);
     const offset = opts?.offset || 0;
     const type = opts?.type;
     const excludeSlugs = opts?.exclude_slugs;
-    const detailLow = opts?.detail === 'low';
+    const detailLow = opts?.detail === "low";
     const language = opts?.language;
     const symbolKind = opts?.symbolKind;
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
-      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+      console.warn(
+        `[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`,
+      );
     }
 
-    const vecStr = '[' + Array.from(embedding).join(',') + ']';
+    const vecStr = "[" + Array.from(embedding).join(",") + "]";
 
     // Two-stage CTE (v0.22): inner CTE keeps a pure-distance ORDER BY so
     // the HNSW index stays usable. Folding source-boost into the inner
@@ -593,28 +699,38 @@ export class PostgresEngine implements BrainEngine {
     // innerLimit scales with offset to preserve the pagination contract:
     // a fixed cap of 100 would silently empty offset > 100.
     const boostMap = resolveBoostMap();
-    const sourceFactorCaseOnSlug = buildSourceFactorCase('slug', boostMap, opts?.detail);
-    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
-    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+    const sourceFactorCaseOnSlug = buildSourceFactorCase(
+      "slug",
+      boostMap,
+      opts?.detail,
+    );
+    const hardExcludePrefixes = resolveHardExcludes(
+      opts?.exclude_slug_prefixes,
+      opts?.include_slug_prefixes,
+    );
+    const hardExcludeClause = buildHardExcludeClause(
+      "p.slug",
+      hardExcludePrefixes,
+    );
     const innerLimit = offset + Math.max(limit * 5, 100);
 
     const params: unknown[] = [vecStr];
-    let typeClause = '';
+    let typeClause = "";
     if (type) {
       params.push(type);
       typeClause = `AND p.type = $${params.length}`;
     }
-    let excludeSlugsClause = '';
+    let excludeSlugsClause = "";
     if (excludeSlugs?.length) {
       params.push(excludeSlugs);
       excludeSlugsClause = `AND p.slug != ALL($${params.length}::text[])`;
     }
-    let languageClause = '';
+    let languageClause = "";
     if (language) {
       params.push(language);
       languageClause = `AND cc.language = $${params.length}`;
     }
-    let symbolKindClause = '';
+    let symbolKindClause = "";
     if (symbolKind) {
       params.push(symbolKind);
       symbolKindClause = `AND cc.symbol_type = $${params.length}`;
@@ -635,7 +751,7 @@ export class PostgresEngine implements BrainEngine {
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         WHERE cc.embedding IS NOT NULL
-          ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
+          ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ""}
           ${typeClause}
           ${excludeSlugsClause}
           ${languageClause}
@@ -655,14 +771,19 @@ export class PostgresEngine implements BrainEngine {
       OFFSET ${offsetParam}
     `;
 
-    const rows = await sql.begin(async sql => {
+    const rows = await sql.begin(async (sql) => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
+      return await sql.unsafe(
+        rawQuery,
+        params as Parameters<typeof sql.unsafe>[1],
+      );
     });
     return rows.map(rowToSearchResult);
   }
 
-  async getEmbeddingsByChunkIds(ids: number[]): Promise<Map<number, Float32Array>> {
+  async getEmbeddingsByChunkIds(
+    ids: number[],
+  ): Promise<Map<number, Float32Array>> {
     if (ids.length === 0) return new Map();
     const sql = this.sql;
     const rows = await sql`
@@ -687,7 +808,7 @@ export class PostgresEngine implements BrainEngine {
     const pageId = pages[0].id;
 
     // Remove chunks that no longer exist (chunk_index beyond new count)
-    const newIndices = chunks.map(c => c.chunk_index);
+    const newIndices = chunks.map((c) => c.chunk_index);
     if (newIndices.length > 0) {
       await sql`DELETE FROM content_chunks WHERE page_id = ${pageId} AND chunk_index != ALL(${newIndices})`;
     } else {
@@ -702,36 +823,61 @@ export class PostgresEngine implements BrainEngine {
     // v0.20.0 Cathedral II Layer 6: adds parent_symbol_path / doc_comment /
     // symbol_name_qualified so nested-chunk emission (A3) can round-trip
     // scope metadata through upserts.
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)';
+    const cols =
+      "(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)";
     const rows: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
 
     for (const chunk of chunks) {
       const embeddingStr = chunk.embedding
-        ? '[' + Array.from(chunk.embedding).join(',') + ']'
+        ? "[" + Array.from(chunk.embedding).join(",") + "]"
         : null;
-      const parentPath = chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
-        ? chunk.parent_symbol_path
-        : null;
+      const parentPath =
+        chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
+          ? chunk.parent_symbol_path
+          : null;
 
       if (embeddingStr) {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
+        rows.push(
+          `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`,
+        );
         params.push(
-          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
-          embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
-          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
-          chunk.start_line ?? null, chunk.end_line ?? null,
-          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+          pageId,
+          chunk.chunk_index,
+          chunk.chunk_text,
+          chunk.chunk_source,
+          embeddingStr,
+          chunk.model || "text-embedding-3-large",
+          chunk.token_count || null,
+          chunk.language || null,
+          chunk.symbol_name || null,
+          chunk.symbol_type || null,
+          chunk.start_line ?? null,
+          chunk.end_line ?? null,
+          parentPath,
+          chunk.doc_comment || null,
+          chunk.symbol_name_qualified || null,
         );
       } else {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
+        rows.push(
+          `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`,
+        );
         params.push(
-          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
-          chunk.model || 'text-embedding-3-large', chunk.token_count || null,
-          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
-          chunk.start_line ?? null, chunk.end_line ?? null,
-          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+          pageId,
+          chunk.chunk_index,
+          chunk.chunk_text,
+          chunk.chunk_source,
+          chunk.model || "text-embedding-3-large",
+          chunk.token_count || null,
+          chunk.language || null,
+          chunk.symbol_name || null,
+          chunk.symbol_type || null,
+          chunk.start_line ?? null,
+          chunk.end_line ?? null,
+          parentPath,
+          chunk.doc_comment || null,
+          chunk.symbol_name_qualified || null,
         );
       }
     }
@@ -744,7 +890,7 @@ export class PostgresEngine implements BrainEngine {
     // on `embedding IS NULL` rather than `embedded_at IS NULL` — and it's why we now keep both
     // columns honest at write time.
     await sql.unsafe(
-      `INSERT INTO content_chunks ${cols} VALUES ${rows.join(', ')}
+      `INSERT INTO content_chunks ${cols} VALUES ${rows.join(", ")}
        ON CONFLICT (page_id, chunk_index) DO UPDATE SET
          chunk_text = EXCLUDED.chunk_text,
          chunk_source = EXCLUDED.chunk_source,
@@ -833,10 +979,10 @@ export class PostgresEngine implements BrainEngine {
     }
     // Default link_source to 'markdown' for back-compat with pre-v0.13 callers.
     // origin_page_id resolves from originSlug via the pages join (NULL if no slug).
-    const src = linkSource ?? 'markdown';
+    const src = linkSource ?? "markdown";
     await sql`
       INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
-      SELECT f.id, t.id, ${linkType || ''}, ${context || ''}, ${src},
+      SELECT f.id, t.id, ${linkType || ""}, ${context || ""}, ${src},
              (SELECT id FROM pages WHERE slug = ${originSlug ?? null}),
              ${originField ?? null}
       FROM pages f, pages t
@@ -858,16 +1004,16 @@ export class PostgresEngine implements BrainEngine {
     //   link_source  → 'markdown' (back-compat with pre-v0.13 callers)
     //   origin_slug  → NULL (resolves to origin_page_id IS NULL via LEFT JOIN)
     //   origin_field → NULL
-    const fromSlugs = links.map(l => l.from_slug);
-    const toSlugs = links.map(l => l.to_slug);
-    const linkTypes = links.map(l => l.link_type || '');
-    const contexts = links.map(l => l.context || '');
-    const linkSources = links.map(l => l.link_source || 'markdown');
-    const originSlugs = links.map(l => l.origin_slug || null);
-    const originFields = links.map(l => l.origin_field || null);
-    const fromSourceIds = links.map(l => l.from_source_id || 'default');
-    const toSourceIds = links.map(l => l.to_source_id || 'default');
-    const originSourceIds = links.map(l => l.origin_source_id || 'default');
+    const fromSlugs = links.map((l) => l.from_slug);
+    const toSlugs = links.map((l) => l.to_slug);
+    const linkTypes = links.map((l) => l.link_type || "");
+    const contexts = links.map((l) => l.context || "");
+    const linkSources = links.map((l) => l.link_source || "markdown");
+    const originSlugs = links.map((l) => l.origin_slug || null);
+    const originFields = links.map((l) => l.origin_field || null);
+    const fromSourceIds = links.map((l) => l.from_source_id || "default");
+    const toSourceIds = links.map((l) => l.to_source_id || "default");
+    const originSourceIds = links.map((l) => l.origin_source_id || "default");
     const result = await sql`
       INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
       SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
@@ -886,7 +1032,12 @@ export class PostgresEngine implements BrainEngine {
     return result.length;
   }
 
-  async removeLink(from: string, to: string, linkType?: string, linkSource?: string): Promise<void> {
+  async removeLink(
+    from: string,
+    to: string,
+    linkType?: string,
+    linkSource?: string,
+  ): Promise<void> {
     const sql = this.sql;
     // Build up filters dynamically. linkType + linkSource are independent
     // optional constraints; all four combinations are valid.
@@ -967,7 +1118,7 @@ export class PostgresEngine implements BrainEngine {
     // Tie-breaker: sort by slug after similarity so re-runs return the
     // same winner when multiple pages score equally (prevents churn
     // in put_page auto-link reconciliation).
-    const prefixPattern = dirPrefix ? `${dirPrefix}/%` : '%';
+    const prefixPattern = dirPrefix ? `${dirPrefix}/%` : "%";
     const rows = await sql`
       SELECT slug, similarity(title, ${name}) AS sim
       FROM pages
@@ -1022,22 +1173,29 @@ export class PostgresEngine implements BrainEngine {
       title: r.title as string,
       type: r.type as PageType,
       depth: r.depth as number,
-      links: (typeof r.links === 'string' ? JSON.parse(r.links) : r.links) as { to_slug: string; link_type: string }[],
+      links: (typeof r.links === "string" ? JSON.parse(r.links) : r.links) as {
+        to_slug: string;
+        link_type: string;
+      }[],
     }));
   }
 
   async traversePaths(
     slug: string,
-    opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both' },
+    opts?: {
+      depth?: number;
+      linkType?: string;
+      direction?: "in" | "out" | "both";
+    },
   ): Promise<GraphPath[]> {
     const sql = this.sql;
     const depth = opts?.depth ?? 5;
-    const direction = opts?.direction ?? 'out';
+    const direction = opts?.direction ?? "out";
     const linkType = opts?.linkType ?? null;
     const linkTypeMatches = linkType !== null;
 
     let rows;
-    if (direction === 'out') {
+    if (direction === "out") {
       rows = await sql`
         WITH RECURSIVE walk AS (
           SELECT p.id, p.slug, 0::int as depth, ARRAY[p.id] as visited
@@ -1049,7 +1207,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages p2 ON p2.id = l.to_page_id
           WHERE w.depth < ${depth}
             AND NOT (p2.id = ANY(w.visited))
-            AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
+            AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ""})
         )
         SELECT w.slug as from_slug, p2.slug as to_slug,
                l.link_type, l.context, w.depth + 1 as depth
@@ -1057,10 +1215,10 @@ export class PostgresEngine implements BrainEngine {
         JOIN links l ON l.from_page_id = w.id
         JOIN pages p2 ON p2.id = l.to_page_id
         WHERE w.depth < ${depth}
-          AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
+          AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ""})
         ORDER BY depth, from_slug, to_slug
       `;
-    } else if (direction === 'in') {
+    } else if (direction === "in") {
       rows = await sql`
         WITH RECURSIVE walk AS (
           SELECT p.id, p.slug, 0::int as depth, ARRAY[p.id] as visited
@@ -1072,7 +1230,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages p2 ON p2.id = l.from_page_id
           WHERE w.depth < ${depth}
             AND NOT (p2.id = ANY(w.visited))
-            AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
+            AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ""})
         )
         SELECT p2.slug as from_slug, w.slug as to_slug,
                l.link_type, l.context, w.depth + 1 as depth
@@ -1080,7 +1238,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN links l ON l.to_page_id = w.id
         JOIN pages p2 ON p2.id = l.from_page_id
         WHERE w.depth < ${depth}
-          AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
+          AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ""})
         ORDER BY depth, from_slug, to_slug
       `;
     } else {
@@ -1095,7 +1253,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages p2 ON p2.id = CASE WHEN l.from_page_id = w.id THEN l.to_page_id ELSE l.from_page_id END
           WHERE w.depth < ${depth}
             AND NOT (p2.id = ANY(w.visited))
-            AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
+            AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ""})
         )
         SELECT pf.slug as from_slug, pt.slug as to_slug,
                l.link_type, l.context, w.depth + 1 as depth
@@ -1104,7 +1262,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN pages pf ON pf.id = l.from_page_id
         JOIN pages pt ON pt.id = l.to_page_id
         WHERE w.depth < ${depth}
-          AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
+          AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ""})
         ORDER BY depth, from_slug, to_slug
       `;
     }
@@ -1120,7 +1278,7 @@ export class PostgresEngine implements BrainEngine {
         from_slug: r.from_slug as string,
         to_slug: r.to_slug as string,
         link_type: r.link_type as string,
-        context: (r.context as string) || '',
+        context: (r.context as string) || "",
         depth: Number(r.depth),
       });
     }
@@ -1146,7 +1304,36 @@ export class PostgresEngine implements BrainEngine {
     return result;
   }
 
-  async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
+  async getTiersForSlugs(slugs: string[]): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    if (slugs.length === 0) return result;
+    for (const s of slugs) result.set(s, 0);
+
+    const sql = this.sql;
+    // Guard the int cast: bad frontmatter ('abc', '1.5', '') would otherwise
+    // raise and kill the whole hybridSearch boost step. Regex-gate to digits
+    // first; JS clamp below handles out-of-range integers (negative, >3).
+    const rows = await sql`
+      SELECT p.slug as slug,
+             CASE
+               WHEN p.frontmatter->>'tier' ~ '^-?[0-9]+$'
+                 THEN (p.frontmatter->>'tier')::int
+               ELSE 0
+             END as tier
+      FROM pages p
+      WHERE p.slug = ANY(${slugs}::text[])
+    `;
+    for (const r of rows as unknown as { slug: string; tier: number }[]) {
+      const t = Number(r.tier);
+      // Clamp to {0,1,2,3} — defensive against bad frontmatter values
+      result.set(r.slug, t >= 1 && t <= 3 ? t : 0);
+    }
+    return result;
+  }
+
+  async findOrphanPages(): Promise<
+    Array<{ slug: string; title: string; domain: string | null }>
+  > {
     const sql = this.sql;
     const rows = await sql`
       SELECT
@@ -1159,7 +1346,11 @@ export class PostgresEngine implements BrainEngine {
       )
       ORDER BY p.slug
     `;
-    return rows as unknown as Array<{ slug: string; title: string; domain: string | null }>;
+    return rows as unknown as Array<{
+      slug: string;
+      title: string;
+      domain: string | null;
+    }>;
   }
 
   // Tags
@@ -1168,7 +1359,8 @@ export class PostgresEngine implements BrainEngine {
     // Verify page exists before attempting insert (ON CONFLICT DO NOTHING
     // swallows the "already tagged" case, but we still need to detect missing pages)
     const page = await sql`SELECT id FROM pages WHERE slug = ${slug}`;
-    if (page.length === 0) throw new Error(`addTag failed: page "${slug}" not found`);
+    if (page.length === 0)
+      throw new Error(`addTag failed: page "${slug}" not found`);
     await sql`
       INSERT INTO tags (page_id, tag)
       VALUES (${page[0].id}, ${tag})
@@ -1213,21 +1405,23 @@ export class PostgresEngine implements BrainEngine {
     // makes that ambiguity safe (caller asserts page exists).
     await sql`
       INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-      SELECT id, ${entry.date}::date, ${entry.source || ''}, ${entry.summary}, ${entry.detail || ''}
+      SELECT id, ${entry.date}::date, ${entry.source || ""}, ${entry.summary}, ${entry.detail || ""}
       FROM pages WHERE slug = ${slug}
       ON CONFLICT (page_id, date, summary) DO NOTHING
     `;
   }
 
-  async addTimelineEntriesBatch(entries: TimelineBatchInput[]): Promise<number> {
+  async addTimelineEntriesBatch(
+    entries: TimelineBatchInput[],
+  ): Promise<number> {
     if (entries.length === 0) return 0;
     const sql = this.sql;
-    const slugs = entries.map(e => e.slug);
-    const dates = entries.map(e => e.date);
-    const sources = entries.map(e => e.source || '');
-    const summaries = entries.map(e => e.summary);
-    const details = entries.map(e => e.detail || '');
-    const sourceIds = entries.map(e => e.source_id || 'default');
+    const slugs = entries.map((e) => e.slug);
+    const dates = entries.map((e) => e.date);
+    const sources = entries.map((e) => e.source || "");
+    const summaries = entries.map((e) => e.summary);
+    const details = entries.map((e) => e.detail || "");
+    const sourceIds = entries.map((e) => e.source_id || "default");
     const result = await sql`
       INSERT INTO timeline_entries (page_id, date, source, summary, detail)
       SELECT p.id, v.date::date, v.source, v.summary, v.detail
@@ -1240,7 +1434,10 @@ export class PostgresEngine implements BrainEngine {
     return result.length;
   }
 
-  async getTimeline(slug: string, opts?: TimelineOpts): Promise<TimelineEntry[]> {
+  async getTimeline(
+    slug: string,
+    opts?: TimelineOpts,
+  ): Promise<TimelineEntry[]> {
     const sql = this.sql;
     const limit = opts?.limit || 100;
 
@@ -1283,7 +1480,8 @@ export class PostgresEngine implements BrainEngine {
         fetched_at = now()
       RETURNING id
     `;
-    if (result.length === 0) throw new Error(`putRawData failed: page "${slug}" not found`);
+    if (result.length === 0)
+      throw new Error(`putRawData failed: page "${slug}" not found`);
   }
 
   async getRawData(slug: string, source?: string): Promise<RawData[]> {
@@ -1306,13 +1504,18 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Dream-cycle significance verdict cache (v0.23).
-  async getDreamVerdict(filePath: string, contentHash: string): Promise<DreamVerdict | null> {
+  async getDreamVerdict(
+    filePath: string,
+    contentHash: string,
+  ): Promise<DreamVerdict | null> {
     const sql = this.sql;
-    const rows = await sql<Array<{
-      worth_processing: boolean;
-      reasons: string[] | null;
-      judged_at: Date;
-    }>>`
+    const rows = await sql<
+      Array<{
+        worth_processing: boolean;
+        reasons: string[] | null;
+        judged_at: Date;
+      }>
+    >`
       SELECT worth_processing, reasons, judged_at
       FROM dream_verdicts
       WHERE file_path = ${filePath} AND content_hash = ${contentHash}
@@ -1322,11 +1525,18 @@ export class PostgresEngine implements BrainEngine {
     return {
       worth_processing: r.worth_processing,
       reasons: r.reasons ?? [],
-      judged_at: r.judged_at instanceof Date ? r.judged_at.toISOString() : String(r.judged_at),
+      judged_at:
+        r.judged_at instanceof Date
+          ? r.judged_at.toISOString()
+          : String(r.judged_at),
     };
   }
 
-  async putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void> {
+  async putDreamVerdict(
+    filePath: string,
+    contentHash: string,
+    verdict: DreamVerdictInput,
+  ): Promise<void> {
     const sql = this.sql;
     await sql`
       INSERT INTO dream_verdicts (file_path, content_hash, worth_processing, reasons)
@@ -1347,7 +1557,8 @@ export class PostgresEngine implements BrainEngine {
       FROM pages WHERE slug = ${slug}
       RETURNING *
     `;
-    if (rows.length === 0) throw new Error(`createVersion failed: page "${slug}" not found`);
+    if (rows.length === 0)
+      throw new Error(`createVersion failed: page "${slug}" not found`);
     return rows[0] as unknown as PageVersion;
   }
 
@@ -1461,16 +1672,25 @@ export class PostgresEngine implements BrainEngine {
 
     // brain_score: 0-100 weighted average
     const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
-    const timelineCoverageWhole = pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
-    const noOrphans = pageCount > 0 ? 1 - (orphanPages / pageCount) : 1;
-    const noDeadLinks = pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
+    const timelineCoverageWhole =
+      pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
+    const noOrphans = pageCount > 0 ? 1 - orphanPages / pageCount : 1;
+    const noDeadLinks =
+      pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
     // Per-component points. Sum equals brainScore by construction.
-    const embedCoverageScore = pageCount === 0 ? 0 : Math.round(embedCoverage * 35);
+    const embedCoverageScore =
+      pageCount === 0 ? 0 : Math.round(embedCoverage * 35);
     const linkDensityScore = pageCount === 0 ? 0 : Math.round(linkDensity * 25);
-    const timelineCoverageScore = pageCount === 0 ? 0 : Math.round(timelineCoverageWhole * 15);
+    const timelineCoverageScore =
+      pageCount === 0 ? 0 : Math.round(timelineCoverageWhole * 15);
     const noOrphansScore = pageCount === 0 ? 0 : Math.round(noOrphans * 15);
     const noDeadLinksScore = pageCount === 0 ? 0 : Math.round(noDeadLinks * 10);
-    const brainScore = embedCoverageScore + linkDensityScore + timelineCoverageScore + noOrphansScore + noDeadLinksScore;
+    const brainScore =
+      embedCoverageScore +
+      linkDensityScore +
+      timelineCoverageScore +
+      noOrphansScore +
+      noDeadLinksScore;
 
     return {
       page_count: pageCount,
@@ -1482,7 +1702,9 @@ export class PostgresEngine implements BrainEngine {
       dead_links: deadLinks,
       link_coverage: Number(h.link_coverage),
       timeline_coverage: Number(h.timeline_coverage),
-      most_connected: (connected as unknown as { slug: string; link_count: number }[]).map(c => ({
+      most_connected: (
+        connected as unknown as { slug: string; link_count: number }[]
+      ).map((c) => ({
         slug: c.slug,
         link_count: Number(c.link_count),
       })),
@@ -1567,7 +1789,11 @@ export class PostgresEngine implements BrainEngine {
     this._reconnecting = true;
     try {
       // Tear down old pool (best-effort — it may already be dead)
-      try { await this.disconnect(); } catch { /* swallow */ }
+      try {
+        await this.disconnect();
+      } catch {
+        /* swallow */
+      }
       // Create fresh pool
       await this.connect(this._savedConfig);
     } finally {
@@ -1575,9 +1801,15 @@ export class PostgresEngine implements BrainEngine {
     }
   }
 
-  async executeRaw<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+  async executeRaw<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<T[]> {
     const conn = this.sql;
-    return conn.unsafe(sql, params as Parameters<typeof conn.unsafe>[1]) as unknown as T[];
+    return conn.unsafe(
+      sql,
+      params as Parameters<typeof conn.unsafe>[1],
+    ) as unknown as T[];
     // Pre-#406 behavior: throw on any error including connection death.
     // Per-call auto-retry is not safe here because executeRaw is also used
     // for non-transactional mutations (DELETE/UPDATE/INSERT in sources.ts,
@@ -1596,21 +1828,23 @@ export class PostgresEngine implements BrainEngine {
   // per-lang tree-sitter queries land in Layer 5/6.
   // ============================================================
 
-  async addCodeEdges(edges: import('./types.ts').CodeEdgeInput[]): Promise<number> {
+  async addCodeEdges(
+    edges: import("./types.ts").CodeEdgeInput[],
+  ): Promise<number> {
     if (edges.length === 0) return 0;
     const sql = this.sql;
     let inserted = 0;
-    const resolved = edges.filter(e => e.to_chunk_id != null);
-    const unresolved = edges.filter(e => e.to_chunk_id == null);
+    const resolved = edges.filter((e) => e.to_chunk_id != null);
+    const unresolved = edges.filter((e) => e.to_chunk_id == null);
 
     if (resolved.length > 0) {
-      const fromIds = resolved.map(e => e.from_chunk_id);
-      const toIds = resolved.map(e => e.to_chunk_id as number);
-      const fromQual = resolved.map(e => e.from_symbol_qualified);
-      const toQual = resolved.map(e => e.to_symbol_qualified);
-      const edgeTypes = resolved.map(e => e.edge_type);
-      const metas = resolved.map(e => JSON.stringify(e.edge_metadata ?? {}));
-      const sources = resolved.map(e => e.source_id ?? null);
+      const fromIds = resolved.map((e) => e.from_chunk_id);
+      const toIds = resolved.map((e) => e.to_chunk_id as number);
+      const fromQual = resolved.map((e) => e.from_symbol_qualified);
+      const toQual = resolved.map((e) => e.to_symbol_qualified);
+      const edgeTypes = resolved.map((e) => e.edge_type);
+      const metas = resolved.map((e) => JSON.stringify(e.edge_metadata ?? {}));
+      const sources = resolved.map((e) => e.source_id ?? null);
       const res = await sql`
         INSERT INTO code_edges_chunk (from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type, edge_metadata, source_id)
         SELECT * FROM unnest(
@@ -1625,12 +1859,14 @@ export class PostgresEngine implements BrainEngine {
     }
 
     if (unresolved.length > 0) {
-      const fromIds = unresolved.map(e => e.from_chunk_id);
-      const fromQual = unresolved.map(e => e.from_symbol_qualified);
-      const toQual = unresolved.map(e => e.to_symbol_qualified);
-      const edgeTypes = unresolved.map(e => e.edge_type);
-      const metas = unresolved.map(e => JSON.stringify(e.edge_metadata ?? {}));
-      const sources = unresolved.map(e => e.source_id ?? null);
+      const fromIds = unresolved.map((e) => e.from_chunk_id);
+      const fromQual = unresolved.map((e) => e.from_symbol_qualified);
+      const toQual = unresolved.map((e) => e.to_symbol_qualified);
+      const edgeTypes = unresolved.map((e) => e.edge_type);
+      const metas = unresolved.map((e) =>
+        JSON.stringify(e.edge_metadata ?? {}),
+      );
+      const sources = unresolved.map((e) => e.source_id ?? null);
       const res = await sql`
         INSERT INTO code_edges_symbol (from_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type, edge_metadata, source_id)
         SELECT * FROM unnest(
@@ -1657,7 +1893,7 @@ export class PostgresEngine implements BrainEngine {
   async getCallersOf(
     qualifiedName: string,
     opts?: { sourceId?: string; allSources?: boolean; limit?: number },
-  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+  ): Promise<import("./types.ts").CodeEdgeResult[]> {
     const sql = this.sql;
     const limit = Math.min(opts?.limit ?? 100, 500);
     const scopedSource: string | null =
@@ -1676,13 +1912,13 @@ export class PostgresEngine implements BrainEngine {
         ${scopedSource ? sql`AND source_id = ${scopedSource}` : sql``}
       LIMIT ${limit}
     `;
-    return rows.map(r => pgRowToCodeEdge(r as Record<string, unknown>));
+    return rows.map((r) => pgRowToCodeEdge(r as Record<string, unknown>));
   }
 
   async getCalleesOf(
     qualifiedName: string,
     opts?: { sourceId?: string; allSources?: boolean; limit?: number },
-  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+  ): Promise<import("./types.ts").CodeEdgeResult[]> {
     const sql = this.sql;
     const limit = Math.min(opts?.limit ?? 100, 500);
     const scopedSource: string | null =
@@ -1701,15 +1937,19 @@ export class PostgresEngine implements BrainEngine {
         ${scopedSource ? sql`AND source_id = ${scopedSource}` : sql``}
       LIMIT ${limit}
     `;
-    return rows.map(r => pgRowToCodeEdge(r as Record<string, unknown>));
+    return rows.map((r) => pgRowToCodeEdge(r as Record<string, unknown>));
   }
 
   async getEdgesByChunk(
     chunkId: number,
-    opts?: { direction?: 'in' | 'out' | 'both'; edgeType?: string; limit?: number },
-  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    opts?: {
+      direction?: "in" | "out" | "both";
+      edgeType?: string;
+      limit?: number;
+    },
+  ): Promise<import("./types.ts").CodeEdgeResult[]> {
     const sql = this.sql;
-    const direction = opts?.direction ?? 'both';
+    const direction = opts?.direction ?? "both";
     const limit = Math.min(opts?.limit ?? 50, 200);
     const typeFilter = opts?.edgeType;
 
@@ -1718,14 +1958,18 @@ export class PostgresEngine implements BrainEngine {
              edge_type, edge_metadata, source_id, true as resolved
         FROM code_edges_chunk
         WHERE
-          ${direction === 'in' ? sql`to_chunk_id = ${chunkId}`
-            : direction === 'out' ? sql`from_chunk_id = ${chunkId}`
-            : sql`(from_chunk_id = ${chunkId} OR to_chunk_id = ${chunkId})`}
+          ${
+            direction === "in"
+              ? sql`to_chunk_id = ${chunkId}`
+              : direction === "out"
+                ? sql`from_chunk_id = ${chunkId}`
+                : sql`(from_chunk_id = ${chunkId} OR to_chunk_id = ${chunkId})`
+          }
           ${typeFilter ? sql`AND edge_type = ${typeFilter}` : sql``}
         LIMIT ${limit}
     `;
     let symbolRows: unknown[] = [];
-    if (direction !== 'in') {
+    if (direction !== "in") {
       const sRows = await sql`
         SELECT id, from_chunk_id, NULL::int as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
                edge_type, edge_metadata, source_id, false as resolved
@@ -1736,7 +1980,9 @@ export class PostgresEngine implements BrainEngine {
       `;
       symbolRows = [...sRows];
     }
-    return [...chunkRows, ...symbolRows].map(r => pgRowToCodeEdge(r as Record<string, unknown>));
+    return [...chunkRows, ...symbolRows].map((r) =>
+      pgRowToCodeEdge(r as Record<string, unknown>),
+    );
   }
 
   // Eval capture (v0.25.0). See BrainEngine interface docs.
@@ -1757,12 +2003,17 @@ export class PostgresEngine implements BrainEngine {
     return rows[0]!.id as number;
   }
 
-  async listEvalCandidates(filter?: { since?: Date; limit?: number; tool?: 'query' | 'search' }): Promise<EvalCandidate[]> {
+  async listEvalCandidates(filter?: {
+    since?: Date;
+    limit?: number;
+    tool?: "query" | "search";
+  }): Promise<EvalCandidate[]> {
     const sql = this.sql;
     const raw = filter?.limit;
-    const limit = (raw === undefined || raw === null || !Number.isFinite(raw) || raw <= 0)
-      ? 1000
-      : Math.min(Math.floor(raw), 100000);
+    const limit =
+      raw === undefined || raw === null || !Number.isFinite(raw) || raw <= 0
+        ? 1000
+        : Math.min(Math.floor(raw), 100000);
     const since = filter?.since ?? new Date(0);
     const tool = filter?.tool ?? null;
     // id DESC tiebreaker so same-millisecond inserts return deterministically
@@ -1797,7 +2048,9 @@ export class PostgresEngine implements BrainEngine {
     await sql`INSERT INTO eval_capture_failures (reason) VALUES (${reason})`;
   }
 
-  async listEvalCaptureFailures(filter?: { since?: Date }): Promise<EvalCaptureFailure[]> {
+  async listEvalCaptureFailures(filter?: {
+    since?: Date;
+  }): Promise<EvalCaptureFailure[]> {
     const sql = this.sql;
     const since = filter?.since ?? new Date(0);
     const rows = await sql`
@@ -1809,14 +2062,16 @@ export class PostgresEngine implements BrainEngine {
   }
 }
 
-function pgRowToCodeEdge(row: Record<string, unknown>): import('./types.ts').CodeEdgeResult {
+function pgRowToCodeEdge(
+  row: Record<string, unknown>,
+): import("./types.ts").CodeEdgeResult {
   return {
     id: row.id as number,
     from_chunk_id: row.from_chunk_id as number,
     to_chunk_id: row.to_chunk_id == null ? null : (row.to_chunk_id as number),
-    from_symbol_qualified: (row.from_symbol_qualified as string) ?? '',
-    to_symbol_qualified: (row.to_symbol_qualified as string) ?? '',
-    edge_type: (row.edge_type as string) ?? '',
+    from_symbol_qualified: (row.from_symbol_qualified as string) ?? "",
+    to_symbol_qualified: (row.to_symbol_qualified as string) ?? "",
+    edge_type: (row.edge_type as string) ?? "",
     edge_metadata: (row.edge_metadata as Record<string, unknown>) ?? {},
     source_id: row.source_id == null ? null : (row.source_id as string),
     resolved: Boolean(row.resolved),
