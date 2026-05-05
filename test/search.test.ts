@@ -3,18 +3,23 @@
  * cosine similarity, dedup key, and CJK word count.
  */
 
-import { describe, test, expect } from 'bun:test';
-import { rrfFusion, cosineSimilarity, applyBacklinkBoost } from '../src/core/search/hybrid.ts';
-import type { SearchResult } from '../src/core/types.ts';
+import { describe, test, expect } from "bun:test";
+import {
+  rrfFusion,
+  cosineSimilarity,
+  applyBacklinkBoost,
+  applyTierBoost,
+} from "../src/core/search/hybrid.ts";
+import type { SearchResult } from "../src/core/types.ts";
 
 function makeResult(overrides: Partial<SearchResult> = {}): SearchResult {
   return {
-    slug: 'test-page',
+    slug: "test-page",
     page_id: 1,
-    title: 'Test',
-    type: 'concept',
-    chunk_text: 'test chunk text',
-    chunk_source: 'compiled_truth',
+    title: "Test",
+    type: "concept",
+    chunk_text: "test chunk text",
+    chunk_source: "compiled_truth",
     chunk_id: 1,
     chunk_index: 0,
     score: 0,
@@ -23,20 +28,30 @@ function makeResult(overrides: Partial<SearchResult> = {}): SearchResult {
   };
 }
 
-describe('rrfFusion', () => {
-  test('normalizes scores to 0-1 range', () => {
+describe("rrfFusion", () => {
+  test("normalizes scores to 0-1 range", () => {
     const list: SearchResult[] = [
-      makeResult({ slug: 'a', chunk_id: 1, chunk_text: 'aaa' }),
-      makeResult({ slug: 'b', chunk_id: 2, chunk_text: 'bbb' }),
+      makeResult({ slug: "a", chunk_id: 1, chunk_text: "aaa" }),
+      makeResult({ slug: "b", chunk_id: 2, chunk_text: "bbb" }),
     ];
     const results = rrfFusion([list], 60);
     // Top result should have score >= 1.0 (normalized to 1.0, then boosted 2.0x for compiled_truth)
     expect(results[0].score).toBe(2.0); // 1.0 * 2.0 boost
   });
 
-  test('boosts compiled_truth chunks 2x over timeline', () => {
-    const compiledChunk = makeResult({ slug: 'a', chunk_id: 1, chunk_source: 'compiled_truth', chunk_text: 'compiled text' });
-    const timelineChunk = makeResult({ slug: 'b', chunk_id: 2, chunk_source: 'timeline', chunk_text: 'timeline text' });
+  test("boosts compiled_truth chunks 2x over timeline", () => {
+    const compiledChunk = makeResult({
+      slug: "a",
+      chunk_id: 1,
+      chunk_source: "compiled_truth",
+      chunk_text: "compiled text",
+    });
+    const timelineChunk = makeResult({
+      slug: "b",
+      chunk_id: 2,
+      chunk_source: "timeline",
+      chunk_text: "timeline text",
+    });
 
     // Put timeline first (higher rank) in the list
     const results = rrfFusion([[timelineChunk, compiledChunk]], 60);
@@ -46,52 +61,82 @@ describe('rrfFusion', () => {
     // Normalized: timeline = 1.0, compiled = 0.983
     // Boosted: timeline = 1.0 * 1.0 = 1.0, compiled = 0.983 * 2.0 = 1.967
     // Compiled should now rank first
-    expect(results[0].slug).toBe('a');
-    expect(results[0].chunk_source).toBe('compiled_truth');
+    expect(results[0].slug).toBe("a");
+    expect(results[0].chunk_source).toBe("compiled_truth");
     expect(results[0].score).toBeGreaterThan(results[1].score);
   });
 
-  test('timeline-only results are not boosted', () => {
+  test("timeline-only results are not boosted", () => {
     const list: SearchResult[] = [
-      makeResult({ slug: 'a', chunk_id: 1, chunk_source: 'timeline', chunk_text: 'tl1' }),
-      makeResult({ slug: 'b', chunk_id: 2, chunk_source: 'timeline', chunk_text: 'tl2' }),
+      makeResult({
+        slug: "a",
+        chunk_id: 1,
+        chunk_source: "timeline",
+        chunk_text: "tl1",
+      }),
+      makeResult({
+        slug: "b",
+        chunk_id: 2,
+        chunk_source: "timeline",
+        chunk_text: "tl2",
+      }),
     ];
     const results = rrfFusion([list], 60);
     // Top result: normalized to 1.0, no boost (timeline = 1.0x)
     expect(results[0].score).toBe(1.0);
   });
 
-  test('returns empty for empty lists', () => {
+  test("returns empty for empty lists", () => {
     expect(rrfFusion([], 60)).toEqual([]);
     expect(rrfFusion([[]], 60)).toEqual([]);
   });
 
-  test('single result normalizes to 1.0 before boost', () => {
-    const results = rrfFusion([[makeResult({ chunk_source: 'timeline' })]], 60);
+  test("single result normalizes to 1.0 before boost", () => {
+    const results = rrfFusion([[makeResult({ chunk_source: "timeline" })]], 60);
     expect(results).toHaveLength(1);
     expect(results[0].score).toBe(1.0); // 1.0 normalized * 1.0 timeline boost
   });
 
-  test('uses chunk_id for dedup key when available', () => {
-    const chunk1 = makeResult({ slug: 'a', chunk_id: 10, chunk_text: 'same prefix text' });
-    const chunk2 = makeResult({ slug: 'a', chunk_id: 20, chunk_text: 'same prefix text' });
+  test("uses chunk_id for dedup key when available", () => {
+    const chunk1 = makeResult({
+      slug: "a",
+      chunk_id: 10,
+      chunk_text: "same prefix text",
+    });
+    const chunk2 = makeResult({
+      slug: "a",
+      chunk_id: 20,
+      chunk_text: "same prefix text",
+    });
 
     const results = rrfFusion([[chunk1, chunk2]], 60);
     // Both should survive because chunk_id differs
     expect(results).toHaveLength(2);
   });
 
-  test('falls back to text prefix when chunk_id is missing', () => {
-    const chunk1 = makeResult({ slug: 'a', chunk_id: undefined as any, chunk_text: 'same text' });
-    const chunk2 = makeResult({ slug: 'a', chunk_id: undefined as any, chunk_text: 'same text' });
+  test("falls back to text prefix when chunk_id is missing", () => {
+    const chunk1 = makeResult({
+      slug: "a",
+      chunk_id: undefined as any,
+      chunk_text: "same text",
+    });
+    const chunk2 = makeResult({
+      slug: "a",
+      chunk_id: undefined as any,
+      chunk_text: "same text",
+    });
 
     const results = rrfFusion([[chunk1, chunk2]], 60);
     // Same slug + same text prefix = collapsed to 1
     expect(results).toHaveLength(1);
   });
 
-  test('merges scores across multiple lists', () => {
-    const chunk = makeResult({ slug: 'a', chunk_id: 1, chunk_source: 'timeline' });
+  test("merges scores across multiple lists", () => {
+    const chunk = makeResult({
+      slug: "a",
+      chunk_id: 1,
+      chunk_source: "timeline",
+    });
     // Chunk appears at rank 0 in both lists
     const results = rrfFusion([[chunk], [{ ...chunk }]], 60);
     expect(results).toHaveLength(1);
@@ -99,8 +144,8 @@ describe('rrfFusion', () => {
     expect(results[0].score).toBe(1.0);
   });
 
-  test('respects custom K parameter', () => {
-    const list = [makeResult({ chunk_source: 'timeline' })];
+  test("respects custom K parameter", () => {
+    const list = [makeResult({ chunk_source: "timeline" })];
     const k30 = rrfFusion([list], 30);
     const k90 = rrfFusion([list], 90);
     // Both have single result, normalized to 1.0
@@ -109,25 +154,25 @@ describe('rrfFusion', () => {
   });
 });
 
-describe('cosineSimilarity', () => {
-  test('identical vectors return 1.0', () => {
+describe("cosineSimilarity", () => {
+  test("identical vectors return 1.0", () => {
     const v = new Float32Array([1, 2, 3]);
     expect(cosineSimilarity(v, v)).toBeCloseTo(1.0, 5);
   });
 
-  test('orthogonal vectors return 0.0', () => {
+  test("orthogonal vectors return 0.0", () => {
     const a = new Float32Array([1, 0, 0]);
     const b = new Float32Array([0, 1, 0]);
     expect(cosineSimilarity(a, b)).toBeCloseTo(0.0, 5);
   });
 
-  test('opposite vectors return -1.0', () => {
+  test("opposite vectors return -1.0", () => {
     const a = new Float32Array([1, 0, 0]);
     const b = new Float32Array([-1, 0, 0]);
     expect(cosineSimilarity(a, b)).toBeCloseTo(-1.0, 5);
   });
 
-  test('zero vector returns 0.0 (no division by zero)', () => {
+  test("zero vector returns 0.0 (no division by zero)", () => {
     const zero = new Float32Array([0, 0, 0]);
     const v = new Float32Array([1, 2, 3]);
     expect(cosineSimilarity(zero, v)).toBe(0);
@@ -135,14 +180,14 @@ describe('cosineSimilarity', () => {
     expect(cosineSimilarity(zero, zero)).toBe(0);
   });
 
-  test('works with high-dimensional vectors', () => {
+  test("works with high-dimensional vectors", () => {
     const dim = 1536;
     const a = new Float32Array(dim).fill(1);
     const b = new Float32Array(dim).fill(1);
     expect(cosineSimilarity(a, b)).toBeCloseTo(1.0, 5);
   });
 
-  test('basis vectors are orthogonal', () => {
+  test("basis vectors are orthogonal", () => {
     const dim = 10;
     const a = new Float32Array(dim);
     const b = new Float32Array(dim);
@@ -152,90 +197,196 @@ describe('cosineSimilarity', () => {
   });
 });
 
-describe('CJK word count in expansion', () => {
-  test('CJK characters are counted individually', async () => {
+describe("CJK word count in expansion", () => {
+  test("CJK characters are counted individually", async () => {
     // Import the module to test CJK detection logic
-    const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test('向量搜索');
+    const hasCJK =
+      /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test("向量搜索");
     expect(hasCJK).toBe(true);
 
-    const query = '向量搜索优化';
-    const wordCount = query.replace(/\s/g, '').length;
+    const query = "向量搜索优化";
+    const wordCount = query.replace(/\s/g, "").length;
     expect(wordCount).toBe(6); // 6 CJK chars, not 1 "word"
   });
 
-  test('non-CJK uses space-delimited counting', () => {
-    const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test('hello world');
+  test("non-CJK uses space-delimited counting", () => {
+    const hasCJK =
+      /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(
+        "hello world",
+      );
     expect(hasCJK).toBe(false);
 
-    const query = 'hello world';
+    const query = "hello world";
     const wordCount = (query.match(/\S+/g) || []).length;
     expect(wordCount).toBe(2);
   });
 
-  test('Japanese hiragana detected as CJK', () => {
-    const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test('こんにちは');
+  test("Japanese hiragana detected as CJK", () => {
+    const hasCJK =
+      /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(
+        "こんにちは",
+      );
     expect(hasCJK).toBe(true);
   });
 
-  test('Korean hangul detected as CJK', () => {
-    const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test('안녕하세요');
+  test("Korean hangul detected as CJK", () => {
+    const hasCJK =
+      /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(
+        "안녕하세요",
+      );
     expect(hasCJK).toBe(true);
   });
 
-  test('mixed CJK+Latin uses CJK counting', () => {
-    const query = 'AI 向量搜索';
-    const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(query);
+  test("mixed CJK+Latin uses CJK counting", () => {
+    const query = "AI 向量搜索";
+    const hasCJK =
+      /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(query);
     expect(hasCJK).toBe(true);
-    const wordCount = query.replace(/\s/g, '').length;
+    const wordCount = query.replace(/\s/g, "").length;
     expect(wordCount).toBe(6); // "AI向量搜索" = 6 chars
   });
 });
 
-describe('applyBacklinkBoost (v0.10.1)', () => {
-  test('zero backlinks: no change to score', () => {
-    const results: SearchResult[] = [makeResult({ slug: 'a', score: 1.0 })];
+describe("applyBacklinkBoost (v0.10.1)", () => {
+  test("zero backlinks: no change to score", () => {
+    const results: SearchResult[] = [makeResult({ slug: "a", score: 1.0 })];
     applyBacklinkBoost(results, new Map());
     expect(results[0].score).toBe(1.0);
   });
 
-  test('positive backlinks boost score by formula (1 + 0.05 * log(1 + count))', () => {
-    const results: SearchResult[] = [makeResult({ slug: 'popular', score: 1.0 })];
-    applyBacklinkBoost(results, new Map([['popular', 10]]));
+  test("positive backlinks boost score by formula (1 + 0.05 * log(1 + count))", () => {
+    const results: SearchResult[] = [
+      makeResult({ slug: "popular", score: 1.0 }),
+    ];
+    applyBacklinkBoost(results, new Map([["popular", 10]]));
     // 1.0 * (1 + 0.05 * log(11)) ≈ 1.0 * 1.1199
     const expected = 1.0 * (1 + 0.05 * Math.log(11));
     expect(results[0].score).toBeCloseTo(expected, 4);
   });
 
-  test('higher count = larger boost (log scaling)', () => {
-    const a: SearchResult[] = [makeResult({ slug: 'a', score: 1.0 })];
-    const b: SearchResult[] = [makeResult({ slug: 'b', score: 1.0 })];
-    applyBacklinkBoost(a, new Map([['a', 1]]));
-    applyBacklinkBoost(b, new Map([['b', 100]]));
+  test("higher count = larger boost (log scaling)", () => {
+    const a: SearchResult[] = [makeResult({ slug: "a", score: 1.0 })];
+    const b: SearchResult[] = [makeResult({ slug: "b", score: 1.0 })];
+    applyBacklinkBoost(a, new Map([["a", 1]]));
+    applyBacklinkBoost(b, new Map([["b", 100]]));
     expect(b[0].score).toBeGreaterThan(a[0].score);
   });
 
-  test('mutates results in place (no return value)', () => {
-    const results: SearchResult[] = [makeResult({ slug: 'x', score: 1.0 })];
-    const ret = applyBacklinkBoost(results, new Map([['x', 5]]));
+  test("mutates results in place (no return value)", () => {
+    const results: SearchResult[] = [makeResult({ slug: "x", score: 1.0 })];
+    const ret = applyBacklinkBoost(results, new Map([["x", 5]]));
     expect(ret).toBeUndefined();
     expect(results[0].score).toBeGreaterThan(1.0);
   });
 
-  test('slug not in counts map: no boost', () => {
-    const results: SearchResult[] = [makeResult({ slug: 'unknown', score: 0.5 })];
-    applyBacklinkBoost(results, new Map([['other', 100]]));
+  test("slug not in counts map: no boost", () => {
+    const results: SearchResult[] = [
+      makeResult({ slug: "unknown", score: 0.5 }),
+    ];
+    applyBacklinkBoost(results, new Map([["other", 100]]));
     expect(results[0].score).toBe(0.5);
   });
 
-  test('multiple results with mixed counts: each scored independently', () => {
+  test("multiple results with mixed counts: each scored independently", () => {
     const results: SearchResult[] = [
-      makeResult({ slug: 'a', score: 1.0 }),
-      makeResult({ slug: 'b', score: 1.0 }),
-      makeResult({ slug: 'c', score: 1.0 }),
+      makeResult({ slug: "a", score: 1.0 }),
+      makeResult({ slug: "b", score: 1.0 }),
+      makeResult({ slug: "c", score: 1.0 }),
     ];
-    applyBacklinkBoost(results, new Map([['a', 0], ['b', 5], ['c', 50]]));
+    applyBacklinkBoost(
+      results,
+      new Map([
+        ["a", 0],
+        ["b", 5],
+        ["c", 50],
+      ]),
+    );
     expect(results[0].score).toBe(1.0);
     expect(results[1].score).toBeGreaterThan(1.0);
     expect(results[2].score).toBeGreaterThan(results[1].score);
+  });
+});
+
+describe("applyTierBoost (server-side tier-aware boost)", () => {
+  test("tier=0 (unset): identity, no change", () => {
+    const results: SearchResult[] = [makeResult({ slug: "a", score: 1.0 })];
+    applyTierBoost(results, new Map());
+    expect(results[0].score).toBe(1.0);
+  });
+
+  test("tier=1: 1.5x boost", () => {
+    const results: SearchResult[] = [makeResult({ slug: "faq", score: 1.0 })];
+    applyTierBoost(results, new Map([["faq", 1]]));
+    expect(results[0].score).toBeCloseTo(1.5, 4);
+  });
+
+  test("tier=2: 1.15x boost", () => {
+    const results: SearchResult[] = [
+      makeResult({ slug: "curated", score: 1.0 }),
+    ];
+    applyTierBoost(results, new Map([["curated", 2]]));
+    expect(results[0].score).toBeCloseTo(1.15, 4);
+  });
+
+  test("tier=3: identity (raw / auto-extract)", () => {
+    const results: SearchResult[] = [makeResult({ slug: "task", score: 1.0 })];
+    applyTierBoost(results, new Map([["task", 3]]));
+    expect(results[0].score).toBe(1.0);
+  });
+
+  test("tier=1 outranks tier=3 with otherwise-equal score (root-cause regression guard)", () => {
+    // Mirrors the production retrieval bug that buried Sales FAQ #71 under
+    // task-pipeline pages with same compiled_truth chunk_source. After tier
+    // boost, the tier=1 FAQ must rank above the tier=3 task page.
+    const results: SearchResult[] = [
+      makeResult({ slug: "task-page", score: 0.85 }),
+      makeResult({ slug: "tier1-faq", score: 0.85 }),
+    ];
+    applyTierBoost(
+      results,
+      new Map([
+        ["task-page", 3],
+        ["tier1-faq", 1],
+      ]),
+    );
+    // Caller is responsible for sorting; we only assert the boost direction.
+    expect(results[1].score).toBeGreaterThan(results[0].score);
+  });
+
+  test("mutates results in place (no return value)", () => {
+    const results: SearchResult[] = [makeResult({ slug: "x", score: 1.0 })];
+    const ret = applyTierBoost(results, new Map([["x", 1]]));
+    expect(ret).toBeUndefined();
+    expect(results[0].score).toBeCloseTo(1.5, 4);
+  });
+
+  test("slug not in tier map: no boost (defensive default)", () => {
+    const results: SearchResult[] = [
+      makeResult({ slug: "orphan", score: 0.5 }),
+    ];
+    applyTierBoost(results, new Map([["other", 1]]));
+    expect(results[0].score).toBe(0.5);
+  });
+
+  test("multiple results with mixed tiers: each scored independently", () => {
+    const results: SearchResult[] = [
+      makeResult({ slug: "a", score: 1.0 }),
+      makeResult({ slug: "b", score: 1.0 }),
+      makeResult({ slug: "c", score: 1.0 }),
+      makeResult({ slug: "d", score: 1.0 }),
+    ];
+    applyTierBoost(
+      results,
+      new Map([
+        ["a", 0],
+        ["b", 1],
+        ["c", 2],
+        ["d", 3],
+      ]),
+    );
+    expect(results[0].score).toBe(1.0); // tier=0 identity
+    expect(results[1].score).toBeCloseTo(1.5, 4); // tier=1
+    expect(results[2].score).toBeCloseTo(1.15, 4); // tier=2
+    expect(results[3].score).toBe(1.0); // tier=3 identity
   });
 });

@@ -9,13 +9,13 @@
  * Cosine re-score: blend 0.7*rrf + 0.3*cosine for query-specific ranking
  */
 
-import type { BrainEngine } from '../engine.ts';
-import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
-import type { SearchResult, SearchOpts, HybridSearchMeta } from '../types.ts';
-import { embed } from '../embedding.ts';
-import { dedupResults } from './dedup.ts';
-import { autoDetectDetail } from './intent.ts';
-import { expandAnchors, hydrateChunks } from './two-pass.ts';
+import type { BrainEngine } from "../engine.ts";
+import { MAX_SEARCH_LIMIT, clampSearchLimit } from "../engine.ts";
+import type { SearchResult, SearchOpts, HybridSearchMeta } from "../types.ts";
+import { embed } from "../embedding.ts";
+import { dedupResults } from "./dedup.ts";
+import { autoDetectDetail } from "./intent.ts";
+import { expandAnchors, hydrateChunks } from "./two-pass.ts";
 
 const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
@@ -29,18 +29,65 @@ const COMPILED_TRUTH_BOOST = 2.0;
  * boosted ranking determines which chunks per page are kept.
  */
 const BACKLINK_BOOST_COEF = 0.05;
-const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
+
+/**
+ * Tier boost factors applied AFTER cosine re-score and AFTER backlink boost,
+ * BEFORE dedup. Server-side counterpart to the hermes plugin tier rerank,
+ * so retrieval ordering is correct even when the plugin degrades to cosine.
+ *   tier=1 (Kevin/Simon-confirmed FAQ)  → 1.5x
+ *   tier=2 (curated/reviewed)           → 1.15x
+ *   tier=3 (auto-extract raw)           → 1.0x (identity)
+ *   tier=0 (unset/unknown)              → 1.0x (identity, untagged unchanged)
+ *
+ * Default ON. Disable with `GBRAIN_TIER_BOOST=false`. Override factors with
+ * `GBRAIN_TIER_BOOST_FACTOR_T1` / `GBRAIN_TIER_BOOST_FACTOR_T2`.
+ */
+const TIER_BOOST_FACTORS: Record<number, number> = {
+  1: Number(process.env.GBRAIN_TIER_BOOST_FACTOR_T1 ?? "1.5"),
+  2: Number(process.env.GBRAIN_TIER_BOOST_FACTOR_T2 ?? "1.15"),
+  3: 1.0,
+  0: 1.0,
+};
+const TIER_BOOST_ENABLED = process.env.GBRAIN_TIER_BOOST !== "false";
+
+const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === "1";
 
 /**
  * Apply backlink boost to a result list in place. Mutates each result's score
  * by (1 + BACKLINK_BOOST_COEF * log(1 + count)). Pure data transform; no DB call.
  * Caller fetches counts via engine.getBacklinkCounts.
  */
-export function applyBacklinkBoost(results: SearchResult[], counts: Map<string, number>): void {
+export function applyBacklinkBoost(
+  results: SearchResult[],
+  counts: Map<string, number>,
+): void {
   for (const r of results) {
     const count = counts.get(r.slug) ?? 0;
     if (count > 0) {
-      r.score *= (1.0 + BACKLINK_BOOST_COEF * Math.log(1 + count));
+      r.score *= 1.0 + BACKLINK_BOOST_COEF * Math.log(1 + count);
+    }
+  }
+}
+
+/**
+ * Apply tier boost in place. Pure data transform; caller fetches tiers via
+ * engine.getTiersForSlugs. Mirrors applyBacklinkBoost pattern.
+ */
+export function applyTierBoost(
+  results: SearchResult[],
+  tiers: Map<string, number>,
+): void {
+  if (!TIER_BOOST_ENABLED) return;
+  for (const r of results) {
+    const tier = tiers.get(r.slug) ?? 0;
+    const factor = TIER_BOOST_FACTORS[tier] ?? 1.0;
+    if (factor !== 1.0) {
+      r.score *= factor;
+      if (DEBUG) {
+        console.error(
+          `[search-debug] tier-boost ${r.slug} tier=${tier} factor=${factor} new_score=${r.score.toFixed(4)}`,
+        );
+      }
     }
   }
 }
@@ -67,6 +114,32 @@ export interface HybridSearchOpts extends SearchOpts {
   onMeta?: (meta: HybridSearchMeta) => void;
 }
 
+/**
+ * Apply backlink + tier boosts in place, then sort by score descending.
+ * Independent boost failures must not cancel each other — backlink boost was
+ * shipped before tier boost, so a tier-fetch error must not regress backlink
+ * ranking. Hence Promise.allSettled, not Promise.all. Caller already
+ * surrounds with try/catch for non-fatal degradation.
+ */
+async function applyPostFusionBoosts(
+  engine: BrainEngine,
+  results: SearchResult[],
+): Promise<void> {
+  if (results.length === 0) return;
+  const slugs = Array.from(new Set(results.map((r) => r.slug)));
+  const [countsRes, tiersRes] = await Promise.allSettled([
+    engine.getBacklinkCounts(slugs),
+    engine.getTiersForSlugs(slugs),
+  ]);
+  if (countsRes.status === "fulfilled") {
+    applyBacklinkBoost(results, countsRes.value);
+  }
+  if (tiersRes.status === "fulfilled") {
+    applyTierBoost(results, tiersRes.value);
+  }
+  results.sort((a, b) => b.score - a.score);
+}
+
 export async function hybridSearch(
   engine: BrainEngine,
   query: string,
@@ -78,7 +151,7 @@ export async function hybridSearch(
 
   // Auto-detect detail level from query intent when caller doesn't specify
   const detail = opts?.detail ?? autoDetectDetail(query);
-  const detailResolved: 'low' | 'medium' | 'high' | null = detail ?? null;
+  const detailResolved: "low" | "medium" | "high" | null = detail ?? null;
   const searchOpts: SearchOpts = {
     limit: innerLimit,
     detail,
@@ -113,19 +186,17 @@ export async function hybridSearch(
 
   // Skip vector search entirely if no OpenAI key is configured
   if (!process.env.OPENAI_API_KEY) {
-    // Apply backlink boost in keyword-only path too. One getBacklinkCounts query
-    // per search request; not N+1.
-    if (keywordResults.length > 0) {
-      try {
-        const slugs = Array.from(new Set(keywordResults.map(r => r.slug)));
-        const counts = await engine.getBacklinkCounts(slugs);
-        applyBacklinkBoost(keywordResults, counts);
-        keywordResults.sort((a, b) => b.score - a.score);
-      } catch {
-        // Boost failure is non-fatal: keep unboosted ranking.
-      }
+    // Apply backlink + tier boost in keyword-only path too.
+    try {
+      await applyPostFusionBoosts(engine, keywordResults);
+    } catch {
+      // Boost failure is non-fatal: keep unboosted ranking.
     }
-    emitMeta({ vector_enabled: false, detail_resolved: detailResolved, expansion_applied: false });
+    emitMeta({
+      vector_enabled: false,
+      detail_resolved: detailResolved,
+      expansion_applied: false,
+    });
     return dedupResults(keywordResults).slice(offset, offset + limit);
   }
 
@@ -148,10 +219,10 @@ export async function hybridSearch(
   let vectorLists: SearchResult[][] = [];
   let queryEmbedding: Float32Array | null = null;
   try {
-    const embeddings = await Promise.all(queries.map(q => embed(q)));
+    const embeddings = await Promise.all(queries.map((q) => embed(q)));
     queryEmbedding = embeddings[0];
     vectorLists = await Promise.all(
-      embeddings.map(emb => engine.searchVector(emb, searchOpts)),
+      embeddings.map((emb) => engine.searchVector(emb, searchOpts)),
     );
   } catch {
     // Embedding failure is non-fatal, fall back to keyword-only
@@ -159,32 +230,38 @@ export async function hybridSearch(
 
   if (vectorLists.length === 0) {
     // Embed/vector failed silently; record that vector did not run.
-    emitMeta({ vector_enabled: false, detail_resolved: detailResolved, expansion_applied: expansionApplied });
+    // Apply boosts so tier=1 FAQs still rank correctly without vector search.
+    try {
+      await applyPostFusionBoosts(engine, keywordResults);
+    } catch {
+      // Boost failure is non-fatal: keep unboosted ranking.
+    }
+    emitMeta({
+      vector_enabled: false,
+      detail_resolved: detailResolved,
+      expansion_applied: expansionApplied,
+    });
     return dedupResults(keywordResults).slice(offset, offset + limit);
   }
 
   // Merge all result lists via RRF (includes normalization + boost)
   // Skip boost for detail=high (temporal/event queries want natural ranking)
   const allLists = [...vectorLists, keywordResults];
-  let fused = rrfFusion(allLists, opts?.rrfK ?? RRF_K, detail !== 'high');
+  let fused = rrfFusion(allLists, opts?.rrfK ?? RRF_K, detail !== "high");
 
   // Cosine re-scoring before dedup so semantically better chunks survive
   if (queryEmbedding) {
     fused = await cosineReScore(engine, fused, queryEmbedding);
   }
 
-  // Apply backlink boost AFTER cosine re-score so the boost survives normalization,
-  // and BEFORE dedup so it influences which chunks per page survive deduplication.
-  // One DB query for the whole result set (not N+1).
-  if (fused.length > 0) {
-    try {
-      const slugs = Array.from(new Set(fused.map(r => r.slug)));
-      const counts = await engine.getBacklinkCounts(slugs);
-      applyBacklinkBoost(fused, counts);
-      fused.sort((a, b) => b.score - a.score);
-    } catch {
-      // Boost failure is non-fatal: keep blended cosine ranking.
-    }
+  // Apply backlink + tier boost AFTER cosine re-score so they survive
+  // normalization, and BEFORE dedup so they influence which chunks per page
+  // survive deduplication. Helper batches both DB lookups via Promise.allSettled
+  // so a tier-fetch failure can't regress the pre-existing backlink boost.
+  try {
+    await applyPostFusionBoosts(engine, fused);
+  } catch {
+    // Boost failure is non-fatal: keep blended cosine ranking.
   }
 
   // v0.20.0 Cathedral II Layer 7 (A2): two-pass structural expansion.
@@ -209,13 +286,13 @@ export async function hybridSearch(
         sourceId: opts?.sourceId,
       });
       // Resolve new chunk IDs (not already in fused) into full rows.
-      const existingIds = new Set(fused.map(r => r.chunk_id));
+      const existingIds = new Set(fused.map((r) => r.chunk_id));
       const newIds = expanded
-        .filter(e => !existingIds.has(e.chunk_id))
-        .map(e => e.chunk_id);
+        .filter((e) => !existingIds.has(e.chunk_id))
+        .map((e) => e.chunk_id);
       if (newIds.length > 0) {
         const hydrated = await hydrateChunks(engine, newIds);
-        const scoreById = new Map(expanded.map(e => [e.chunk_id, e.score]));
+        const scoreById = new Map(expanded.map((e) => [e.chunk_id, e.score]));
         for (const r of hydrated) {
           r.score = scoreById.get(r.chunk_id) ?? 0.01;
           fused.push(r);
@@ -237,11 +314,15 @@ export async function hybridSearch(
   // Auto-escalate: if detail=low returned 0, retry with high. The inner
   // call's onMeta fires with the escalated detail_resolved; do NOT also
   // fire here (would double-emit and capture stale meta).
-  if (deduped.length === 0 && opts?.detail === 'low') {
-    return hybridSearch(engine, query, { ...opts, detail: 'high' });
+  if (deduped.length === 0 && opts?.detail === "low") {
+    return hybridSearch(engine, query, { ...opts, detail: "high" });
   }
 
-  emitMeta({ vector_enabled: true, detail_resolved: detailResolved, expansion_applied: expansionApplied });
+  emitMeta({
+    vector_enabled: true,
+    detail_resolved: detailResolved,
+    expansion_applied: expansionApplied,
+  });
   return deduped.slice(offset, offset + limit);
 }
 
@@ -250,7 +331,11 @@ export async function hybridSearch(
  * Each result gets score = sum(1 / (K + rank)) across all lists it appears in.
  * After accumulation: normalize to 0-1, then boost compiled_truth chunks.
  */
-export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true): SearchResult[] {
+export function rrfFusion(
+  lists: SearchResult[][],
+  k: number,
+  applyBoost = true,
+): SearchResult[] {
   const scores = new Map<string, { result: SearchResult; score: number }>();
 
   for (const list of lists) {
@@ -272,18 +357,23 @@ export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true)
   if (entries.length === 0) return [];
 
   // Normalize to 0-1 by dividing by observed max
-  const maxScore = Math.max(...entries.map(e => e.score));
+  const maxScore = Math.max(...entries.map((e) => e.score));
   if (maxScore > 0) {
     for (const e of entries) {
       const rawScore = e.score;
       e.score = e.score / maxScore;
 
       // Apply compiled truth boost after normalization (skip for detail=high)
-      const boost = applyBoost && e.result.chunk_source === 'compiled_truth' ? COMPILED_TRUTH_BOOST : 1.0;
+      const boost =
+        applyBoost && e.result.chunk_source === "compiled_truth"
+          ? COMPILED_TRUTH_BOOST
+          : 1.0;
       e.score *= boost;
 
       if (DEBUG) {
-        console.error(`[search-debug] ${e.result.slug}:${e.result.chunk_id} rrf_raw=${rawScore.toFixed(4)} rrf_norm=${(rawScore / maxScore).toFixed(4)} boost=${boost} boosted=${e.score.toFixed(4)} source=${e.result.chunk_source}`);
+        console.error(
+          `[search-debug] ${e.result.slug}:${e.result.chunk_id} rrf_raw=${rawScore.toFixed(4)} rrf_norm=${(rawScore / maxScore).toFixed(4)} boost=${boost} boosted=${e.score.toFixed(4)} source=${e.result.chunk_source}`,
+        );
       }
     }
   }
@@ -304,7 +394,7 @@ async function cosineReScore(
   queryEmbedding: Float32Array,
 ): Promise<SearchResult[]> {
   const chunkIds = results
-    .map(r => r.chunk_id)
+    .map((r) => r.chunk_id)
     .filter((id): id is number => id != null);
 
   if (chunkIds.length === 0) return results;
@@ -320,26 +410,33 @@ async function cosineReScore(
   if (embeddingMap.size === 0) return results;
 
   // Normalize RRF scores to 0-1 for blending
-  const maxRrf = Math.max(...results.map(r => r.score));
+  const maxRrf = Math.max(...results.map((r) => r.score));
 
-  return results.map(r => {
-    const chunkEmb = r.chunk_id != null ? embeddingMap.get(r.chunk_id) : undefined;
-    if (!chunkEmb) return r;
+  return results
+    .map((r) => {
+      const chunkEmb =
+        r.chunk_id != null ? embeddingMap.get(r.chunk_id) : undefined;
+      if (!chunkEmb) return r;
 
-    const cosine = cosineSimilarity(queryEmbedding, chunkEmb);
-    const normRrf = maxRrf > 0 ? r.score / maxRrf : 0;
-    const blended = 0.7 * normRrf + 0.3 * cosine;
+      const cosine = cosineSimilarity(queryEmbedding, chunkEmb);
+      const normRrf = maxRrf > 0 ? r.score / maxRrf : 0;
+      const blended = 0.7 * normRrf + 0.3 * cosine;
 
-    if (DEBUG) {
-      console.error(`[search-debug] ${r.slug}:${r.chunk_id} cosine=${cosine.toFixed(4)} norm_rrf=${normRrf.toFixed(4)} blended=${blended.toFixed(4)}`);
-    }
+      if (DEBUG) {
+        console.error(
+          `[search-debug] ${r.slug}:${r.chunk_id} cosine=${cosine.toFixed(4)} norm_rrf=${normRrf.toFixed(4)} blended=${blended.toFixed(4)}`,
+        );
+      }
 
-    return { ...r, score: blended };
-  }).sort((a, b) => b.score - a.score);
+      return { ...r, score: blended };
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  let dot = 0, magA = 0, magB = 0;
+  let dot = 0,
+    magA = 0,
+    magB = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     magA += a[i] * a[i];
